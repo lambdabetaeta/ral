@@ -18,7 +18,7 @@ ExitCase<F>      = Ok | Err(F) | Exited(u8) | Stopped(CancelCause)
 `guard`'s release reads `ExitCase<ErrorRecord>`: no success value, no panic.
 It shares `Ending`'s tag table and four payload types; a unit test pins its
 closed type to `Done::ty()` without `panic`. The machine constructs it once
-from the borrowed body outcome, preserving `err`'s witness, and saves the
+from the borrowed body outcome and saves the
 outcome to restore after release. Observation cannot consume that outcome
 ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 
@@ -53,7 +53,7 @@ outcome to restore after release. Observation cannot consume that outcome
 | Wire ending | `FOValue` or boundary `err` | record | byte | cause | text |
 | `poll`'s `ready.outcome` | data | record, including a converted own stop | re-raise | foreign: re-raise | resume unwind |
 | `audit B` | data | record | pass, drop trail | pass, drop trail | unwind |
-| `guard` release (`ExitCase`) | Unit | witnessed record | byte | cause | no release |
+| `guard` release (`ExitCase`) | Unit | record | byte | cause | no release |
 | `await`, `race` winner, brood join | return | raise | raise | raise | resume unwind |
 | `first-settled`, `is-done` | do not inspect ending | same | same | same | same |
 | Worker `done`, `workers` row (`Done`) | Unit | record | byte | cause | text |
@@ -99,7 +99,7 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
 | External failure | retain raw `i32` in `Failure::Exited`; `failure_byte` clamps into `1..=255` when deriving the failure code |
 | `exit n` | refuse outside `0..=255` |
 | `fail m` | `String`, reason `Raised(Claim { m, 1 })`, code 1 |
-| `raise e` | a witnessed record re-raises its exact reason; a hand-built one is a `Claim`, refused at status 0 and above 255 |
+| `raise e` | any record is a `Claim` with its own frame, message, status and site, refused at status 0 and above 255 |
 
 - The clamp's floor is **1**, not 0: Windows `NTSTATUS` read as `i32` may be
   negative, and a failed command must not become success. `Failure::Exited`

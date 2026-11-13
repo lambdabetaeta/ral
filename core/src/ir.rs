@@ -7,9 +7,16 @@
 //! onto, so a span rides with the value rather than the parent; `None`
 //! means the node is synthetic — a builtin, the prelude, generated code.
 
+mod env;
 mod op;
 mod pattern;
 mod redirect;
+mod value;
+
+pub use env::{Binding, Env};
+pub use value::{ListRef, MapRef, VClosRef, ValClos, View};
+#[cfg(test)]
+pub(crate) use value::{block_over, captured, deep_block_chain};
 
 pub use op::{ArithOp, BinaryOp, CompareOp, EqOp};
 pub use pattern::{FieldPattern, Pattern};
@@ -25,7 +32,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 // ── Phases ──────────────────────────────────────────────────────────────
 
@@ -72,15 +79,44 @@ impl Phase for Explicit {
 pub trait IrData: Debug + Clone + PartialEq {
     type Bytes: Debug + Clone + PartialEq + Serialize + DeserializeOwned;
     type Scheme: Debug + Clone + PartialEq + Serialize + DeserializeOwned;
+    /// A record or map node's fields: sorted and distinct at run time, the
+    /// pairs as written on the wire, where admission checks them.
+    type Fields<P: Phase>: FieldMap<Val = Val<P, Self>>
+        + FromIterator<(Name, Spanned<Val<P, Self>>)>
+        + Debug
+        + Clone
+        + PartialEq;
 }
 
-/// Runtime byte strings and closed definition schemes.
+/// The fields of a record or map node, as its representation reads them.
+pub trait FieldMap {
+    type Val;
+    /// In stored order: ascending by key at run time.
+    fn entries(&self) -> impl DoubleEndedIterator<Item = (&Name, &Spanned<Self::Val>)>;
+}
+
+impl<P: Phase, D: IrData> FieldMap for imbl::OrdMap<Name, Spanned<Val<P, D>>> {
+    type Val = Val<P, D>;
+    fn entries(&self) -> impl DoubleEndedIterator<Item = (&Name, &Spanned<Val<P, D>>)> {
+        self.iter()
+    }
+}
+
+impl<P: Phase, D: IrData> FieldMap for Vec<(Name, Spanned<Val<P, D>>)> {
+    type Val = Val<P, D>;
+    fn entries(&self) -> impl DoubleEndedIterator<Item = (&Name, &Spanned<Val<P, D>>)> {
+        self.iter().map(|(name, value)| (name, value))
+    }
+}
+
+/// Runtime byte strings, closed definition schemes and persistent field maps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeData {}
 
 impl IrData for RuntimeData {
     type Bytes = Bytes;
     type Scheme = crate::ty::Closed;
+    type Fields<P: Phase> = imbl::OrdMap<Name, Spanned<Val<P, Self>>>;
 }
 
 // ── Values ──────────────────────────────────────────────────────────────
@@ -116,6 +152,10 @@ impl Occ {
         self.0.len()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(crate) fn contains(&self, name: &str) -> bool {
         self.0.binary_search_by(|n| n.as_ref().cmp(name)).is_ok()
     }
@@ -136,35 +176,32 @@ pub(crate) trait Mentions {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>);
 }
 
-/// IR that closes, with what it mentions computed once, where it is built.
+/// IR that closes. What it mentions is computed on first use, so a node built
+/// at run time pays for it only if something restricts to it.
 #[derive(Debug, Clone)]
 pub struct Node<S> {
     shape: S,
-    occ: Occ,
+    occ: OnceLock<Occ>,
 }
 
 impl<S> Node<S> {
-    pub(crate) fn new(shape: S) -> Arc<Self>
-    where
-        S: Mentions,
-    {
-        Arc::new(Self::build(shape))
-    }
-
-    fn build(shape: S) -> Self
-    where
-        S: Mentions,
-    {
-        let occ = Occ::of(&shape);
-        Self { shape, occ }
+    pub(crate) fn new(shape: S) -> Arc<Self> {
+        Arc::new(Self::from(shape))
     }
 
     pub fn shape(&self) -> &S {
         &self.shape
     }
 
-    pub(crate) fn occ(&self) -> &Occ {
-        &self.occ
+    pub(crate) fn into_shape(self) -> S {
+        self.shape
+    }
+
+    pub(crate) fn occ(&self) -> &Occ
+    where
+        S: Mentions,
+    {
+        self.occ.get_or_init(|| Occ::of(&self.shape))
     }
 }
 
@@ -174,11 +211,13 @@ impl<S: PartialEq> PartialEq for Node<S> {
     }
 }
 
-/// The wire carries the shape alone; decoding recomputes occ, so no occ is
-/// ever read off it.
-impl<S: Mentions> From<S> for Node<S> {
+/// The wire carries the shape alone, so no occ is ever read off it.
+impl<S> From<S> for Node<S> {
     fn from(shape: S) -> Self {
-        Self::build(shape)
+        Self {
+            shape,
+            occ: OnceLock::new(),
+        }
     }
 }
 
@@ -188,7 +227,7 @@ impl<S: Serialize> Serialize for Node<S> {
     }
 }
 
-impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
+impl<'de, S: Deserialize<'de>> Deserialize<'de> for Node<S> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         S::deserialize(deserializer).map(Self::from)
     }
@@ -196,10 +235,15 @@ impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
 
 pub type ThunkNode<P = Explicit, D = RuntimeData> = Node<Arc<Comp<P, D>>>;
 pub type GroupNode<P = Explicit, D = RuntimeData> = Node<Box<[(Name, Arc<Comp<P, D>>)]>>;
-pub type ListNode<P = Explicit, D = RuntimeData> = Node<Box<[Spanned<Val<P, D>>]>>;
-/// Entries sorted by key, distinct; the checker refuses equal keys.
-pub type Fields<P = Explicit, D = RuntimeData> = Box<[(Name, Spanned<Val<P, D>>)]>;
-pub type FieldsNode<P = Explicit, D = RuntimeData> = Node<Fields<P, D>>;
+pub type ListNode<P = Explicit, D = RuntimeData> = Node<imbl::Vector<Spanned<Val<P, D>>>>;
+/// A node's fields under `D`'s representation. Derives see no projection of
+/// `D` through the alias, so none adds a bound that recurses through `Val`.
+pub type FieldsOf<P, D> = <D as IrData>::Fields<P>;
+/// A run-time record or map node's fields: sorted and distinct.
+pub type Fields<P = Explicit> = FieldsOf<P, RuntimeData>;
+pub type FieldsNode<P = Explicit> = Node<Fields<P>>;
+/// A record update's entries, in written order; the checker refuses equal keys.
+pub type UpdateFields<P = Explicit, D = RuntimeData> = Box<[(Name, Spanned<Val<P, D>>)]>;
 
 impl<P: Phase, D: IrData> Mentions for Arc<Comp<P, D>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
@@ -224,9 +268,17 @@ impl<P: Phase, D: IrData> Mentions for Box<[Spanned<Val<P, D>>]> {
     }
 }
 
-impl<P: Phase, D: IrData> Mentions for Box<[(Name, Spanned<Val<P, D>>)]> {
+impl<P: Phase, D: IrData> Mentions for imbl::Vector<Spanned<Val<P, D>>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        for (_key, value) in self {
+        for elem in self {
+            elem.item.mentions(out);
+        }
+    }
+}
+
+impl<F: FieldMap<Val: Mentions>> Mentions for F {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
+        for (_key, value) in self.entries() {
             value.item.mentions(out);
         }
     }
@@ -272,7 +324,7 @@ impl CommandName {
 /// The CBPV value category: inert data, requiring no evaluation.  The typed
 /// literals exist so that `$[…]` lowers into plain `Bind` sequences rather
 /// than round-tripping through string parsing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
 pub enum Val<P: Phase = Explicit, D: IrData = RuntimeData> {
     Unit,
@@ -287,9 +339,9 @@ pub enum Val<P: Phase = Explicit, D: IrData = RuntimeData> {
     /// A plain list literal: no spread, so every element is here already.
     List(Arc<ListNode<P, D>>),
     /// `[key: val, …]`: static labels, no spread.
-    Record(Arc<FieldsNode<P, D>>),
+    Record(#[serde(with = "pairs")] Arc<Node<FieldsOf<P, D>>>),
     /// `[:, key: val, …]`: keys written out, no spread.
-    Map(Arc<FieldsNode<P, D>>),
+    Map(#[serde(with = "pairs")] Arc<Node<FieldsOf<P, D>>>),
     /// The label has no leading backtick; a bare tag carries `Unit`.
     Variant {
         label: Name,
@@ -320,18 +372,172 @@ impl<P: Phase, D: IrData> Val<P, D> {
     }
 
     /// A plain list literal with no spread.
-    pub(crate) fn list(items: impl Into<Box<[Spanned<Self>]>>) -> Self {
-        Self::List(Node::new(items.into()))
+    pub(crate) fn list(items: impl IntoIterator<Item = Spanned<Self>>) -> Self {
+        Self::List(Node::new(items.into_iter().collect()))
     }
 
-    /// `[key: val, …]`, entries already sorted by key.
-    pub(crate) fn record(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
-        Self::Record(Node::new(entries.into()))
+    /// The value under its tag spine.
+    pub(crate) fn terminal(&self) -> &Self {
+        let mut val = self;
+        while let Self::Variant { payload, .. } = val {
+            val = payload;
+        }
+        val
     }
 
-    /// `[:, key: val, …]`, entries already sorted by key.
-    pub(crate) fn map(entries: impl Into<Box<[(Name, Spanned<Self>)]>>) -> Self {
-        Self::Map(Node::new(entries.into()))
+    /// Mentions no name, so no environment can change what it means. Stops at
+    /// the first name met, so a built node answers at its first variable
+    /// without computing its occurrences.
+    pub(crate) fn mentions_nothing(&self) -> bool {
+        /// Queues `children`, refusing at the first variable among them.
+        fn defer<'v, P: Phase, D: IrData>(
+            children: impl Iterator<Item = &'v Val<P, D>>,
+            pending: &mut Vec<&'v Val<P, D>>,
+        ) -> bool {
+            for child in children {
+                if matches!(child.terminal(), Val::Variable(_)) {
+                    return false;
+                }
+                pending.push(child);
+            }
+            true
+        }
+        let mut pending = vec![self];
+        while let Some(val) = pending.pop() {
+            match val.terminal() {
+                Self::Variable(_) => return false,
+                Self::Thunk(node) if !node.occ().is_empty() => return false,
+                Self::List(node) => {
+                    if !defer(node.shape().iter().map(|elem| &elem.item), &mut pending) {
+                        return false;
+                    }
+                }
+                Self::Record(node) | Self::Map(node) => {
+                    if !defer(
+                        node.shape().entries().map(|(_, elem)| &elem.item),
+                        &mut pending,
+                    ) {
+                        return false;
+                    }
+                }
+                Self::Thunk(_)
+                | Self::Unit
+                | Self::String(_)
+                | Self::Int(_)
+                | Self::Float(_)
+                | Self::Bool(_)
+                | Self::Bytes(_)
+                | Self::Builtin(_)
+                | Self::Handle(_) => {}
+                Self::Variant { .. } => unreachable!("the tag spine was peeled above"),
+            }
+        }
+        true
+    }
+
+    /// Visit the names a closure over this value must bind, in syntax order:
+    /// those outside thunks.
+    pub(crate) fn for_each_direct<E>(
+        &self,
+        f: &mut impl FnMut(&Name) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut pending = Vec::new();
+        let mut val = self;
+        loop {
+            match val.terminal() {
+                Self::Variable(name) => f(name)?,
+                Self::List(node) => pending.extend(node.shape().iter().rev().map(|e| &e.item)),
+                Self::Record(node) | Self::Map(node) => {
+                    pending.extend(node.shape().entries().rev().map(|(_, e)| &e.item));
+                }
+                Self::Variant { .. } => unreachable!("the tag spine was peeled above"),
+                Self::Unit
+                | Self::Bool(_)
+                | Self::Int(_)
+                | Self::Float(_)
+                | Self::String(_)
+                | Self::Bytes(_)
+                | Self::Builtin(_)
+                | Self::Handle(_)
+                | Self::Thunk(_) => {}
+            }
+            let Some(next) = pending.pop() else {
+                return Ok(());
+            };
+            val = next;
+        }
+    }
+}
+
+impl<P: Phase> Val<P, RuntimeData> {
+    /// `[key: val, …]`; the last of a repeated key wins.
+    pub(crate) fn record(entries: impl IntoIterator<Item = (Name, Spanned<Self>)>) -> Self {
+        Self::Record(Node::new(entries.into_iter().collect()))
+    }
+
+    /// `[:, key: val, …]`; the last of a repeated key wins.
+    pub(crate) fn map(entries: impl IntoIterator<Item = (Name, Spanned<Self>)>) -> Self {
+        Self::Map(Node::new(entries.into_iter().collect()))
+    }
+}
+
+/// Iterative along the tag spine, which can be arbitrarily deep.
+impl<P: Phase, D: IrData> Clone for Val<P, D> {
+    fn clone(&self) -> Self {
+        let mut labels = Vec::new();
+        let mut val = self;
+        while let Self::Variant { label, payload } = val {
+            labels.push(label);
+            val = payload;
+        }
+        let terminal = match val {
+            Self::Unit => Self::Unit,
+            Self::String(s) => Self::String(s.clone()),
+            Self::Int(n) => Self::Int(*n),
+            Self::Float(f) => Self::Float(*f),
+            Self::Bool(b) => Self::Bool(*b),
+            Self::Variable(name) => Self::Variable(name.clone()),
+            Self::Thunk(node) => Self::Thunk(Arc::clone(node)),
+            Self::List(node) => Self::List(Arc::clone(node)),
+            Self::Record(node) => Self::Record(Arc::clone(node)),
+            Self::Map(node) => Self::Map(Arc::clone(node)),
+            Self::Bytes(b) => Self::Bytes(b.clone()),
+            Self::Builtin(entry) => Self::Builtin(Arc::clone(entry)),
+            Self::Handle(handle) => Self::Handle(handle.clone()),
+            Self::Variant { .. } => unreachable!("the tag spine was peeled above"),
+        };
+        labels
+            .into_iter()
+            .rev()
+            .fold(terminal, |payload, label| Self::Variant {
+                label: label.clone(),
+                payload: Box::new(payload),
+            })
+    }
+}
+
+/// A node's fields on the wire: a sequence of pairs, collected as written (a
+/// run-time map keeps the last of a repeated key; the raw form keeps them all).
+mod pairs {
+    use super::{FieldMap, Name, Node, Spanned};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<F: FieldMap<Val: Serialize>, S: Serializer>(
+        node: &Arc<Node<F>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(node.shape().entries())
+    }
+
+    pub fn deserialize<'de, F, De>(deserializer: De) -> Result<Arc<Node<F>>, De::Error>
+    where
+        F: FieldMap + FromIterator<(Name, Spanned<F::Val>)>,
+        F::Val: Deserialize<'de>,
+        De: Deserializer<'de>,
+    {
+        Vec::<(Name, Spanned<F::Val>)>::deserialize(deserializer)
+            .map(|pairs| Node::new(pairs.into_iter().collect()))
     }
 }
 
@@ -839,12 +1045,14 @@ pub enum CompKind<P: Phase = Explicit, D: IrData = RuntimeData> {
     /// `within OPTS BODY` — install option overrides for the duration of `body`.
     /// `opts` is a spread-free record node, as `grant`'s capabilities are.
     Within {
-        opts: Arc<FieldsNode<P, D>>,
+        #[serde(with = "pairs")]
+        opts: Arc<Node<FieldsOf<P, D>>>,
         body: Val<P, D>,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant {
-        caps: Arc<FieldsNode<P, D>>,
+        #[serde(with = "pairs")]
+        caps: Arc<Node<FieldsOf<P, D>>>,
         body: Val<P, D>,
     },
     /// `spawn [TITLE] BODY` — run `body` on a worker of its own and return its
@@ -907,7 +1115,7 @@ pub enum Prim<P: Phase = Explicit, D: IrData = RuntimeData> {
     },
     Update {
         base: Spanned<Val<P, D>>,
-        fields: Fields<P, D>,
+        fields: UpdateFields<P, D>,
     },
     List(Box<[ValListElem<P, D>]>),
     Map(Box<[MapEntryV<P, D>]>),
@@ -1054,7 +1262,7 @@ impl CommandWord {
 /// sorted, distinct set of mentioned variables.
 #[cfg(test)]
 pub(crate) fn test_occ(names: &[&str]) -> Occ {
-    let elems: Box<[Spanned<Val>]> = names
+    let elems: imbl::Vector<Spanned<Val>> = names
         .iter()
         .map(|n| Spanned::synthetic(Val::Variable(Arc::from(*n))))
         .collect();

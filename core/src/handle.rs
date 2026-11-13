@@ -4,9 +4,11 @@ use crate::data::Str;
 use crate::error::Error;
 use crate::fact::{EvalFailure, Io, Reason, WorkerId};
 use crate::io::{ByteBuffer, Retained, Streams};
+#[cfg(test)]
+use crate::ir::ValClos;
+use crate::ir::{VClosRef, View};
 use crate::process::{CancelCause, ScopeNode};
 use crate::shell::runtime::End;
-use crate::shell::runtime::{ValClos, View};
 use crate::sync::LockExt as _;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
@@ -34,16 +36,16 @@ impl Stamp {
 
 /// Pins live work through data, never descending a block's capture; a partial
 /// builtin's supplied arguments are data.
-pub(crate) fn pins_live_work(v: &ValClos) -> bool {
+pub(crate) fn pins_live_work(v: VClosRef<'_>) -> bool {
     let (_, terminal) = v.peel_variants();
     match terminal.view() {
         View::Handle(Handle::Live(h)) => h.sample().is_live(),
-        View::List(items) => items.iter().any(|item| pins_live_work(&item)),
-        View::Map(entries) => entries.iter().any(|(_, item)| pins_live_work(&item)),
+        View::List(items) => items.iter().any(|item| pins_live_work(item)),
+        View::Map(entries) => entries.iter().any(|(_, item)| pins_live_work(item)),
         View::Thunk { env, .. } => terminal.residual().is_some_and(|(entry, _)| {
             let (_, builtin) = entry.eta();
             env.iter()
-                .any(|(name, binding)| name != builtin && pins_live_work(&binding.value))
+                .any(|(name, binding)| name != builtin && pins_live_work((&binding.value).into()))
         }),
         _ => false,
     }
@@ -355,12 +357,11 @@ mod tests {
             "work".into(),
             ValClos::variant("worker", Some(ValClos::list(vec![ValClos::handle(handle)]))),
         )]);
-        assert!(pins_live_work(&value));
+        assert!(pins_live_work((&value).into()));
         permit.finish(End::Ok(ValClos::UNIT));
-        assert!(!pins_live_work(&value));
-        assert!(!pins_live_work(&ValClos::list(vec![ValClos::withheld(
-            "parent worker"
-        )])));
+        assert!(!pins_live_work((&value).into()));
+        let withheld = ValClos::list(vec![ValClos::withheld("parent worker")]);
+        assert!(!pins_live_work((&withheld).into()));
     }
 
     #[test]

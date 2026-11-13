@@ -160,7 +160,7 @@ fn start_granted<R>(
         .lookup(&shell.context.grants, shell.baseline())
         .admit(&crate::shell::runtime::Mooring::adrift(), shell)
         .expect("the grant admits /bin/sh");
-        let args = ["-c", script].map(crate::shell::runtime::ValClos::string);
+        let args = ["-c", script].map(crate::ir::ValClos::string);
         let command = command
             .prepare(&args, crate::authority::sandbox::Ownership::Kept, shell)
             .expect("the launch builds");

@@ -1,12 +1,18 @@
 ---
 status: active
-generated_at_commit: c0905f5e
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
 anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, BroodGuard, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> Amended 2026-11-13 by [[261112_runtime-values-are-value-closures|runtime values are value closures]]:
+> a caught failure is plain record data with no witness, and `raise` of a
+> record raises it as the program's own claim, keeping frame, message, status
+> and site, without restoring the typed cause or the hints it determined.
 
 > Amended 2026-11-11 by [[decisions/261105_the-error-record|the error record]]:
 > programs read `[frame, message, status, site]`; `$e[message]` replaces

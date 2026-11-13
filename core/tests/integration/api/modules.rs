@@ -12,7 +12,7 @@ use ral_core::shell::runtime::{Break, CapturePolicy, Shell};
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::syntax::quote_word;
 use ral_core::test_helper::{fresh_shell, layer};
-use ral_core::{ValClos, shell::runtime::View};
+use ral_core::{VClosRef, ValClos, View};
 use std::path::{Path, PathBuf};
 
 fn scratch() -> (tempfile::TempDir, PathBuf) {
@@ -37,7 +37,7 @@ fn answer_of(module: &ValClos) -> i64 {
     let View::Map(record) = module.view() else {
         panic!("expected a module record, got {module:?}");
     };
-    match record.get("answer").as_deref().map(ValClos::view) {
+    match record.get("answer").map(VClosRef::view) {
         Some(View::Int(answer)) => answer,
         other => panic!("expected an integer answer, got {other:?}"),
     }

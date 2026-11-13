@@ -14,9 +14,9 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use crate::ir::{Argv, Comp};
+use crate::ir::{Argv, Comp, Env, ValClos};
 use crate::process::{GroupOwner, PreparedTerminalLoan, TerminalHold, TerminalInput};
-use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, ValClos};
+use crate::shell::runtime::{Error, Mooring, Settled, Shell, Signature};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;

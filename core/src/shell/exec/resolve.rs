@@ -4,8 +4,8 @@
 //! `^name` and a path are always externals.
 
 use super::command::{Command, Request};
-use crate::ir::{CommandName, CommandWord};
-use crate::shell::runtime::{Env, HandlerLookup, Shell, ValClos, lookup};
+use crate::ir::{CommandName, CommandWord, Env, ValClos};
+use crate::shell::runtime::{HandlerLookup, Shell, lookup};
 
 /// What a command head names.
 pub(crate) enum Resolution {

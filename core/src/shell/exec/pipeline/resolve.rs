@@ -4,8 +4,8 @@
 use super::super::command::{Command, Request};
 use super::super::resolve::Resolution;
 use super::StageEval;
-use crate::ir::{Comp, CompKind};
-use crate::shell::runtime::{Break, Env, Settled, Shell, ValClos};
+use crate::ir::{Comp, CompKind, Env, ValClos};
+use crate::shell::runtime::{Break, Settled, Shell};
 use std::sync::Arc;
 
 /// One stage's launch decision, frozen here and read by launch rather than

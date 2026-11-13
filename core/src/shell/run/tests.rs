@@ -1,9 +1,10 @@
 use super::*;
 use crate::fact::ExitCode as _;
+use crate::ir::View;
 use crate::process::CancelCause;
 use crate::process::cancel::TestClock;
 use crate::protocol::Ran;
-use crate::shell::runtime::{Break, Escape, View};
+use crate::shell::runtime::{Break, Escape};
 use crate::source::SourceOrigin;
 use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};
@@ -787,10 +788,10 @@ fn inherit_leaves_session_streams_untouched() {
 
 /// Stands in for any Rust panic the evaluator can raise mid-run.
 fn builtin_panic_now(
-    _args: &[crate::shell::runtime::ValClos],
+    _args: &[crate::ir::ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> crate::shell::runtime::Settled<crate::shell::runtime::ValClos> {
+) -> crate::shell::runtime::Settled<crate::ir::ValClos> {
     panic!("run-door test: deliberate mid-eval panic");
 }
 
@@ -1006,27 +1007,24 @@ fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
     );
 }
 
-fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorFact {
+fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorRecord {
     let ending = shell.run(Run::captured(source, test_origin())).expect_ran();
     let End::Ok(value) = ending else {
         panic!("the handler must return the error record: {source}");
     };
-    let View::Map(record) = value.view() else {
-        panic!("the handler must return the error record: {source}");
-    };
-    record
-        .witness()
-        .expect("a caught record is witnessed")
-        .clone()
+    let data = crate::data::FOValue::try_from(&value)
+        .unwrap_or_else(|_| panic!("the handler must return plain data: {source}"));
+    <crate::fact::ErrorRecord as crate::data::datum::Datum>::decode(&data)
+        .unwrap_or_else(|_| panic!("the handler must return the error record: {source}"))
 }
 
 #[test]
 fn an_invisible_prelude_failure_names_and_sites_the_users_call() {
     let mut shell = crate::test_helper::fresh_shell();
     let record = caught_record(&mut shell, "try { last [] } { |e| return $e }");
-    assert_eq!(record.frame(), "last");
-    assert_eq!(record.site().script.as_ref(), "<test>");
-    assert_eq!((record.site().line, record.site().col), (1, 7));
+    assert_eq!(record.frame, "last");
+    assert_eq!(record.site.script.as_ref(), "<test>");
+    assert_eq!((record.site.line, record.site.col), (1, 7));
 }
 
 #[test]
@@ -1036,8 +1034,8 @@ fn a_private_call_is_as_visible_as_any_other_source_frame() {
         &mut shell,
         "let _last = $last\ntry { _last [] } { |e| return $e }",
     );
-    assert_eq!(record.frame(), "_last");
-    assert_eq!((record.site().line, record.site().col), (2, 7));
+    assert_eq!(record.frame, "_last");
+    assert_eq!((record.site.line, record.site.col), (2, 7));
 }
 
 #[test]
@@ -1056,12 +1054,8 @@ fn index_refusals_name_the_operation_inside_and_outside_a_function() {
     ] {
         let mut shell = crate::test_helper::core_shell();
         let record = caught_record(&mut shell, source);
-        assert_eq!(record.frame(), "index", "{source}");
-        assert_eq!(
-            (record.site().line, record.site().col),
-            (line, col),
-            "{source}"
-        );
+        assert_eq!(record.frame, "index", "{source}");
+        assert_eq!((record.site.line, record.site.col), (line, col), "{source}");
     }
 }
 
@@ -1073,12 +1067,14 @@ fn a_direct_external_pipeline_stage_keeps_its_head_and_site() {
         &mut shell,
         "try { let _ = !{ ^sh -c 'exit 7' | ^cat }; fail 'unexpected success' } { |e| return $e }",
     );
+    let reason = crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7));
+    assert_eq!(record.message, reason.describe());
     assert_eq!(
-        record.reason(),
-        &crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7))
+        record.status,
+        crate::fact::FailureCode::failure_code(&reason)
     );
-    assert_eq!(record.frame(), "sh");
-    assert_eq!((record.site().line, record.site().col), (1, 18));
+    assert_eq!(record.frame, "sh");
+    assert_eq!((record.site.line, record.site.col), (1, 18));
 }
 
 #[cfg(unix)]
@@ -1091,12 +1087,14 @@ fn an_invisible_external_pipeline_stage_keeps_its_visible_caller() {
         &mut shell,
         "try { let _ = hidden-pipe; fail 'unexpected success' } { |e| return $e }",
     );
+    let reason = crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7));
+    assert_eq!(record.message, reason.describe());
     assert_eq!(
-        record.reason(),
-        &crate::fact::Reason::process("sh", crate::fact::Failure::Exited(7))
+        record.status,
+        crate::fact::FailureCode::failure_code(&reason)
     );
-    assert_eq!(record.frame(), "hidden-pipe");
-    assert_eq!((record.site().line, record.site().col), (1, 15));
+    assert_eq!(record.frame, "hidden-pipe");
+    assert_eq!((record.site.line, record.site.col), (1, 15));
 }
 
 #[test]
@@ -1123,13 +1121,9 @@ fn named_invisible_blocks_keep_their_call_frames_with_and_without_arguments() {
         .expect("invisible library");
         let before = shell.local.audit.call_site().clone();
         let record = caught_record(&mut shell, source);
-        assert_eq!(record.frame(), name, "{source}");
-        assert_eq!(record.site().script.as_ref(), "<test>", "{source}");
-        assert_eq!(
-            (record.site().line, record.site().col),
-            (line, 7),
-            "{source}"
-        );
+        assert_eq!(record.frame, name, "{source}");
+        assert_eq!(record.site.script.as_ref(), "<test>", "{source}");
+        assert_eq!((record.site.line, record.site.col), (line, 7), "{source}");
         assert_eq!(shell.local.audit.call_site(), &before, "{source}");
     }
 }
@@ -1141,8 +1135,8 @@ fn a_visible_fail_names_and_sites_itself_even_in_a_private_function() {
         &mut shell,
         "let _boom = { |x| fail 'nope' }\ntry { _boom 1 } { |e| return $e }",
     );
-    assert_eq!(record.frame(), "fail");
-    assert_eq!((record.site().line, record.site().col), (1, 19));
+    assert_eq!(record.frame, "fail");
+    assert_eq!((record.site.line, record.site.col), (1, 19));
 }
 
 #[test]
@@ -1153,8 +1147,8 @@ fn completed_sibling_calls_do_not_leak_their_provenance() {
         &mut shell,
         "let f = { |x| return $x }\ntry { f 1; last [] } { |e| return $e }",
     );
-    assert_eq!(record.frame(), "last");
-    assert_eq!((record.site().line, record.site().col), (2, 12));
+    assert_eq!(record.frame, "last");
+    assert_eq!((record.site.line, record.site.col), (2, 12));
     assert_eq!(shell.local.audit.call_site(), &before);
 }
 
@@ -1170,8 +1164,8 @@ fn invisible_code_recovers_its_caller_after_a_visible_nested_call() {
     crate::shell::evaluator::run_source("let hidden = { visible; last [] }", &mut shell)
         .expect("compile invisible library code");
     let record = caught_record(&mut shell, "try { hidden } { |e| return $e }");
-    assert_eq!(record.frame(), "hidden");
-    assert_eq!((record.site().line, record.site().col), (1, 7));
+    assert_eq!(record.frame, "hidden");
+    assert_eq!((record.site.line, record.site.col), (1, 7));
 }
 
 #[test]
@@ -1238,9 +1232,9 @@ fn an_unclaimed_hook_failure_uses_its_origin_base() {
         panic!("hook refusal")
     };
     let record = error.fact(&shell);
-    assert_eq!(record.frame(), name.fault_label());
-    assert_eq!(record.site().script.as_ref(), "<hook-origin>");
-    assert_eq!((record.site().line, record.site().col), (1, 1));
+    assert_eq!(record.frame, name.fault_label());
+    assert_eq!(record.site.script.as_ref(), "<hook-origin>");
+    assert_eq!((record.site.line, record.site.col), (1, 1));
 }
 
 /// A lambda compiled by one run and called by the next draws its caret into
@@ -1634,7 +1628,7 @@ fn a_release_halt_pre_empts_the_bodys_ending() {
 }
 
 #[test]
-fn a_release_reraises_the_exact_witnessed_error() {
+fn a_release_raising_the_body_record_raises_it_as_its_claim() {
     let mut runtime = crate::test_helper::core_runtime();
     let reason = crate::fact::Reason::process("false", crate::fact::Failure::Exited(1));
     let mut error = crate::error::Error::new(reason);
@@ -1656,7 +1650,7 @@ fn a_release_reraises_the_exact_witnessed_error() {
     let End::Err(actual) = ending else {
         panic!("the release must re-raise the body's error: {ending:?}");
     };
-    assert_eq!(actual.fact(&shell), expected.fact(&shell));
+    assert_eq!(actual.fact(&shell), expected.fact(&shell).record().claim());
 }
 
 #[test]

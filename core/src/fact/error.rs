@@ -26,9 +26,9 @@ pub use decode::{
     JsonNumberTarget, JsonShape, JsonShapeFailure, JsonStringFailure, LexicalPathFailure,
     LexicalPathFailureNotWorkingDirectory, NoteFailure, NoteFailureTooLong, OpenScheme,
     OsStringPlatform, OsStringPlatformFailure, PathDecodeFailure, RecIndex,
-    ReservedEnvironmentFailure, ResidualDefect, RowDefect, RowKind, SchemeNames,
-    SealSpellingFailure, TimestampParseFailure, TraceDecodeFailure,
-    TraceDecodeFailurePositionMismatch, UnresolvedRow, ViaFailure, ViaFailureDuplicateTag,
+    ReservedEnvironmentFailure, ResidualDefect, RowDefect, SchemeNames, SealSpellingFailure,
+    TimestampParseFailure, TraceDecodeFailure, TraceDecodeFailurePositionMismatch, UnresolvedRow,
+    ViaFailure, ViaFailureDuplicateTag,
 };
 pub use denial::{
     Denial, DenialDevice, DenialExecRead, DenialExecRun, DenialFlag, DenialFs, EditorFlag,

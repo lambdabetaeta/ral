@@ -6,6 +6,7 @@
 //! and severs the carrier that heard it ([`crate::carrier`]).
 
 use crate::fact::{DecodeCause, DecodeFailure, JsonInputFailure};
+use crate::ir::ValClos;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,7 +15,7 @@ use crate::authority::policy::{GrantLayer, GrantStack};
 use crate::data::datum::Datum;
 use crate::data::{Bytes, FOValue, Finite};
 use crate::handle::Sample;
-use crate::shell::runtime::{Done, Owner, ValClos};
+use crate::shell::runtime::{Done, Owner};
 use crate::ty::{Ty, Typed, closed_record};
 use crate::{memoized_ty, record, variant};
 

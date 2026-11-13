@@ -10,8 +10,8 @@ use super::error::{Reason, UnderAppliedBuiltin, Unwritten};
 use super::solve::{BindHole, Solver};
 use super::table::Table;
 use crate::ir::{
-    CommandName, CommandWord, Comp, CompKind, FieldsNode, GroupNode, Name, Pattern, Phrase, Val,
-    is_synthetic,
+    CommandName, CommandWord, Comp, CompKind, Fields, FieldsNode, GroupNode, Name, Pattern, Phrase,
+    Val, is_synthetic,
 };
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Label, Producer, Row, Scheme, Ty};
@@ -220,7 +220,7 @@ impl Generator {
     ) -> Vec<Spanned<Phrase<LiveSchemes, Inferring>>> {
         let Some((last, prefix)) = phrases.split_last() else {
             if let Some(table) = options {
-                self.check_options(&FieldsNode::new(Box::new([])), table);
+                self.check_options(&FieldsNode::new(Fields::new()), table);
             }
             return Vec::new();
         };

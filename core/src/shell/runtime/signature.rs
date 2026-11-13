@@ -2,8 +2,7 @@
 //! never part of any environment.  [`lookup`] is the one resolution rule: ρ,
 //! then Σ's prelude, then Σ's natives.
 
-use super::env::{Binding, Env};
-use crate::shell::runtime::{ValClos, View};
+use crate::ir::{Binding, Env, ValClos, View};
 use crate::ty::{Binders, Ty};
 use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;

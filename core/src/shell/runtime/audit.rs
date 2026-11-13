@@ -10,8 +10,9 @@
 mod fan_out;
 mod observation;
 
-use super::{Prov, ValClos, outcome_value};
+use super::{Prov, outcome_value};
 use crate::fact::{ErrorFact, Observation};
+use crate::ir::ValClos;
 use crate::source::CallSite;
 use serde::{Deserialize, Serialize};
 

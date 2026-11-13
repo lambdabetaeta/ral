@@ -57,7 +57,8 @@ The evaluator is a CEK machine for [[design/cbpv|call-by-push-value]].
   nonvariable `Val`, binding every direct name in ρ; formation restricts and
   pulls missing direct names from Σ, while component reads share ρ.
 - A variant always has a syntax payload: a bare tag carries `()`.
-  `View::Variant` omits any resolved unit payload, even one named by a variable.
+  `View::Variant`'s payload is a borrowed value; a bare tag's, even one named
+  by a variable, reads as `()`.
 - A form's options are one spread-free record node. `within`'s `handlers:`
   is an ordinary map-valued field; command names are data, with no
   handler-specific syntax, AST or IR node.

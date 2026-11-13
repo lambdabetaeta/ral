@@ -14,10 +14,9 @@ use crate::fact::{
     PluginHookRef, Reason, StateFailure, ValueShape,
 };
 use crate::io::RunIo;
+use crate::ir::{Binding, ValClos, View};
 use crate::process::RequestedTerminalAccess;
-use crate::shell::runtime::Binding;
 use crate::shell::runtime::{Shell, ill_typed};
-use crate::shell::runtime::{ValClos, View};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, hash_map::Entry};
@@ -439,7 +438,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::block_over;
+    use crate::ir::block_over;
 
     fn prompt() -> HookName {
         HookName::session("prompt")

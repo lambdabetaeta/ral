@@ -11,7 +11,7 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::protocol::{Ending, Ran, Report, Run};
 use ral_core::source::SourceOrigin;
-use ral_core::{HookName, ValClos, View, shell::builtins};
+use ral_core::{HookName, VClosRef, ValClos, View, shell::builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ fn print_result(val: &ValClos, theme: &OutputTheme) {
         _ => {
             let s = match val.view() {
                 View::List(_) | View::Map(_) => {
-                    builtins::pretty_print(val, 0, &builtins::REPL_PRINT_PARAMS)
+                    builtins::pretty_print(&VClosRef::from(val), 0, &builtins::REPL_PRINT_PARAMS)
                 }
                 _ => val.to_string(),
             };

@@ -25,11 +25,11 @@ use ral_core::own::{OwnDir, UserFile};
 use ral_core::path::{XdgKind, shown};
 use ral_core::record;
 use ral_core::shell::runtime::{
-    Break, DefaultPolicy, HandlerEntry, Hook, HookName, HookSig, Map, MapRef, Mooring, Settled,
+    Break, DefaultPolicy, HandlerEntry, Hook, HookName, HookSig, Mooring, Settled,
 };
 use ral_core::text::code;
 use ral_core::ty::{Ty, Typed};
-use ral_core::{RegisterError, Shell, ValClos, View, io::terminal};
+use ral_core::{MapRef, RegisterError, Shell, VClosRef, ValClos, View, io::terminal};
 use std::path::PathBuf;
 
 use super::errfmt::report_failed_load;
@@ -113,16 +113,15 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 }
 
 /// Decode the tag only; each setting checks its own payload.
-pub(super) fn decode_setting(value: &ValClos, key: &str) -> Result<Option<ValClos>, String> {
+pub(super) fn decode_setting<'a>(
+    value: VClosRef<'a>,
+    key: &str,
+) -> Result<Option<VClosRef<'a>>, String> {
     match value.view() {
-        View::Variant {
-            label,
-            payload: None,
-        } if label.as_ref() == "inherit" => Ok(None),
-        View::Variant {
-            label,
-            payload: Some(payload),
-        } if label.as_ref() == "set" => Ok(Some(payload.into_owned())),
+        View::Variant { label, payload } if label.as_ref() == "inherit" && payload.is_unit() => {
+            Ok(None)
+        }
+        View::Variant { label, payload } if label.as_ref() == "set" => Ok(Some(payload)),
         _ => Err(format!(
             "{} must be {} (no payload) or {} (one payload); got {value} ({})",
             code(key),
@@ -143,8 +142,8 @@ pub(crate) struct RcPlan {
     #[cfg(unix)]
     umask: Option<rustix::fs::Mode>,
     child_limits: ral_core::process::ChildLimits,
-    env: Map,
-    plugins: Map,
+    env: Vec<(String, ValClos)>,
+    plugins: Vec<(String, ValClos)>,
     handlers: Vec<HandlerEntry>,
     hooks: Vec<(HookName, Hook)>,
 }
@@ -152,13 +151,12 @@ pub(crate) struct RcPlan {
 impl RcPlan {
     /// Judge values against `shell`, which it only reads. The map's keyset
     /// comes from a file checked against the rc table (SPEC §15.3).
-    pub(crate) fn decode(pairs: &Map, shell: &Shell) -> Result<Self, String> {
+    pub(crate) fn decode(pairs: MapRef<'_>, shell: &Shell) -> Result<Self, String> {
         let mut plan = Self::default();
-        for (key, val) in pairs.iter() {
-            let value = val.clone();
+        for (key, value) in pairs.iter() {
             let value = match key {
                 "umask" | "recursion-limit" | "prompt" | "startup" => {
-                    let Some(value) = decode_setting(&value, key).map_err(refuse)? else {
+                    let Some(value) = decode_setting(value, key).map_err(refuse)? else {
                         continue;
                     };
                     value
@@ -171,8 +169,8 @@ impl RcPlan {
                 #[cfg(unix)]
                 ("umask", View::String(s)) => plan.umask = Some(decode_umask(s)?),
                 ("limits", View::Map(m)) => plan.child_limits = decode_limits(m)?,
-                ("env", View::Map(m)) => plan.env = m.to_map(),
-                ("plugins", View::Map(m)) => plan.plugins = m.to_map(),
+                ("env", View::Map(m)) => plan.env = owned_pairs(m),
+                ("plugins", View::Map(m)) => plan.plugins = owned_pairs(m),
                 ("theme", View::Map(m)) => {
                     plan.settings.theme = OutputTheme::from_map(m).map_err(refuse)?;
                 }
@@ -224,7 +222,7 @@ impl RcPlan {
                         _ => DefaultPolicy::denied(),
                     };
                     let hook = shell
-                        .vet_hook(&name, value, HookSig::Block, policy)
+                        .vet_hook(&name, value.into_owned(), HookSig::Block, policy)
                         .map_err(|e| refuse(format!("'{k}': {e}")))?;
                     plan.settings.startup |= k == "startup";
                     plan.hooks.push((name, hook));
@@ -267,8 +265,8 @@ impl RcPlan {
             rustix::process::umask(mask);
         }
         shell.set_child_limits(self.child_limits);
-        for (k, v) in self.env.iter() {
-            match shell.set_env_var(k.to_string(), v.to_string()) {
+        for (k, v) in &self.env {
+            match shell.set_env_var(k.clone(), v.to_string()) {
                 // Ignored: an rc copying a parent's environment carries both.
                 Ok(()) | Err(Reserved::Pwd | Reserved::Oldpwd) => {}
             }
@@ -279,7 +277,7 @@ impl RcPlan {
         if let Some(n) = self.stack_limit {
             shell.set_stack_limit(n);
         }
-        for (name, options) in self.plugins.iter() {
+        for (name, options) in &self.plugins {
             let loaded = load_configured_plugin(name, options, mooring, shell);
             match loaded {
                 Err(Break::Error(e)) => {
@@ -301,7 +299,7 @@ fn load_configured_plugin(
     shell: &mut Shell,
 ) -> Settled<()> {
     match options.view() {
-        View::Map(m) => super::plugin::load::load_plugin(name, m.to_map(), mooring, shell),
+        View::Map(options) => super::plugin::load::load_plugin(name, options, mooring, shell),
         _ => Err(Error::new(Reason::Invalid(Box::new(InvalidFailure {
             operation: "load-plugin".into(),
             path: vec![DataStep::Field(name.into())],
@@ -329,10 +327,16 @@ fn decode_umask(s: &str) -> Result<rustix::fs::Mode, String> {
         .ok_or_else(invalid)
 }
 
+fn owned_pairs(map: MapRef<'_>) -> Vec<(String, ValClos)> {
+    map.iter()
+        .map(|(key, value)| (key.to_owned(), value.into_owned()))
+        .collect()
+}
+
 fn decode_limits(map: MapRef<'_>) -> Result<ral_core::process::ChildLimits, String> {
     let mut limits = ral_core::process::ChildLimits::default();
-    for (key, value) in map {
-        let Some(value) = decode_setting(&value, &format!("limits.{key}")).map_err(refuse)? else {
+    for (key, value) in map.iter() {
+        let Some(value) = decode_setting(value, &format!("limits.{key}")).map_err(refuse)? else {
             continue;
         };
         let View::Int(limit) = value.view() else {
@@ -445,7 +449,7 @@ mod tests {
         )
     }
 
-    fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
+    fn rc_map(shell: &mut Shell, rc_src: &str) -> ValClos {
         let value = ral_core::shell::load::extend_session(
             &Mooring::adrift(),
             shell,
@@ -454,12 +458,17 @@ mod tests {
             Some(ral_core::typecheck::table::declared(Form::Rc)),
         )
         .expect("test rc checks and evaluates");
-        value.as_map("test rc").expect("a written record").to_map()
+        assert!(matches!(value.view(), View::Map(_)), "a written record");
+        value
+    }
+
+    fn decode(pairs: &ValClos, shell: &Shell) -> Result<RcPlan, String> {
+        RcPlan::decode(pairs.as_map("test rc").expect("a written record"), shell)
     }
 
     /// Decode then commit, as the boot builtin does.
-    fn commit(pairs: &Map, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, String> {
-        let plan = RcPlan::decode(pairs, shell)?;
+    fn commit(pairs: &ValClos, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, String> {
+        let plan = decode(pairs, shell)?;
         Ok(plan
             .apply(mooring, shell)
             .expect("a test shell is a session"))
@@ -489,7 +498,7 @@ mod tests {
     /// does, so a plugin load has a desk to tell; the host's plugins after.
     fn loaded_plugins(rc_src: &str) -> Vec<String> {
         let rc_src = rc_src.to_owned();
-        let pairs: Arc<Mutex<Option<Map>>> = Arc::default();
+        let pairs: Arc<Mutex<Option<ValClos>>> = Arc::default();
         let entry = BuiltinEntry::new(
             Cow::Borrowed("_apply-rc"),
             unit_thunk,
@@ -596,7 +605,7 @@ mod tests {
         let skeleton = rc_map(&mut shell, DEFAULT_RC);
         let blanks = rc_map(&mut shell, &rc_source(&[]));
         assert_eq!(skeleton, blanks);
-        assert!(RcPlan::decode(&skeleton, &shell).is_ok());
+        assert!(decode(&skeleton, &shell).is_ok());
     }
 
     #[test]
@@ -656,7 +665,7 @@ mod tests {
     fn limits_inherit_leaves_child_limits_unchanged() {
         let mut shell = prelude_shell();
         let pairs = rc_map(&mut shell, &rc_source(&[]));
-        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        let plan = decode(&pairs, &shell).unwrap();
         assert_eq!(plan.child_limits, ral_core::process::ChildLimits::default());
     }
 
@@ -665,9 +674,9 @@ mod tests {
     fn umask_inherit_leaves_the_process_mask_and_set_decodes_it() {
         let mut shell = prelude_shell();
         let pairs = rc_map(&mut shell, &rc_source(&[]));
-        assert!(RcPlan::decode(&pairs, &shell).unwrap().umask.is_none());
+        assert!(decode(&pairs, &shell).unwrap().umask.is_none());
         let pairs = rc_map(&mut shell, &rc_source(&[("umask", "`set '022'")]));
-        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        let plan = decode(&pairs, &shell).unwrap();
         assert_eq!(plan.umask.unwrap().as_raw_mode(), 0o22);
         let (_, error) = apply_to_fresh_env_rejected(&[("umask", "`set '888'")]);
         assert!(error.contains("octal digits"), "{error}");
@@ -784,7 +793,7 @@ mod tests {
                 "[open-files: `set 0, core-bytes: `set 0, stack-bytes: `set 0]",
             )]),
         );
-        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        let plan = decode(&pairs, &shell).unwrap();
         assert_eq!(
             plan.child_limits,
             ral_core::process::ChildLimits {
@@ -802,9 +811,8 @@ mod tests {
                 ValClos::UNIT,
                 ValClos::variant("set", Some(ValClos::string("64"))),
             ] {
-                let map = Map::from_iter([(key.label.to_owned(), value)]);
-                let error =
-                    decode_limits(ValClos::from(map).as_map("limits").unwrap()).unwrap_err();
+                let map = ValClos::map(vec![(key.label.to_owned(), value)]);
+                let error = decode_limits(map.as_map("limits").unwrap()).unwrap_err();
                 assert!(error.contains(key.label), "{error}");
             }
         }
@@ -1022,20 +1030,20 @@ mod tests {
         let shell = ral_core::test_helper::core_shell();
         for key in table.keys {
             let value = match &key.holds {
-                ral_core::typecheck::table::Holds::Table(sub) => ValClos::from(Map::from_iter(
-                    sub.keys.iter().enumerate().map(|(i, key)| {
+                ral_core::typecheck::table::Holds::Table(sub) => {
+                    ValClos::map(sub.keys.iter().enumerate().map(|(i, key)| {
                         let value = if i == 0 {
                             ValClos::variant("set", Some(ValClos::int(-1)))
                         } else {
                             ValClos::variant("inherit", None)
                         };
                         (key.label.to_owned(), value)
-                    }),
-                )),
+                    }))
+                }
                 _ => ValClos::UNIT,
             };
-            let pairs = Map::from_iter([(key.label.to_string(), value)]);
-            let err = RcPlan::decode(&pairs, &shell)
+            let pairs = ValClos::map(vec![(key.label.to_string(), value)]);
+            let err = decode(&pairs, &shell)
                 .err()
                 .expect("the malformed value satisfies no key");
             assert!(

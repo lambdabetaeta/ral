@@ -6,13 +6,13 @@ use crate::fact::{
     Count, DataStep, DecodeCause, DecodeFailure, JsonEncodeCause, ProtocolData, ProtocolFailure,
     Reason, ReservedVar,
 };
-use crate::ir::{Comp, CompKind, Module, Phrase, Toplevel, Val};
+use crate::ir::{Comp, CompKind, Env, Module, Phrase, Toplevel, Val, ValClos, View};
 use crate::marshal::{self, Marshalled, wire};
 use crate::shell::boot::BakedPrelude;
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::{
-    BindingLease, Context, DefaultPolicy, Env, FrameKind, HandlerEntry, HandlerFrame, HookName,
-    HookSig, Image, RawContext, Runtime, Shell, Terms, ValClos, View,
+    BindingLease, Context, DefaultPolicy, FrameKind, HandlerEntry, HandlerFrame, HookName, HookSig,
+    Image, RawContext, Runtime, Shell, Terms,
 };
 use crate::source::{SourceFile, SourceOrigin, Spanned};
 use crate::sync::LockExt as _;
@@ -776,7 +776,7 @@ fn raw_context_frames_keep_tuple_payload_optional_and_containing_record_paths() 
 fn handler_and_spawn_grant_validation_keep_first_order_payload_paths() {
     for slot in ["entries", "catch_all"] {
         let mut value = envelope();
-        let invalid = json!({"Failure": {"bytes": {"value": "!"}}});
+        let invalid = json!({"Closure": {"tags": [], "val": {"Bytes": "!"}, "env": null}});
         value["context"]["handlers"] = json!([{"entries": [], "kind": "Within"}]);
         let mut path = vec![
             DataStep::Field("context".into()),
@@ -794,9 +794,9 @@ fn handler_and_spawn_grant_validation_keep_first_order_payload_paths() {
             value["context"]["handlers"][0][slot] = invalid;
         }
         path.extend([
-            DataStep::Payload("Failure".into()),
-            DataStep::Payload("bytes".into()),
-            DataStep::Field("value".into()),
+            DataStep::Payload("Closure".into()),
+            DataStep::Field("val".into()),
+            DataStep::Payload("Bytes".into()),
         ]);
         let error = value_failure(&value);
         assert_eq!(error.path, path);

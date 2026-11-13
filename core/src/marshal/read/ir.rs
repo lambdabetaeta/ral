@@ -6,8 +6,8 @@ use crate::data::json::on_json_stack;
 use crate::fact::{DecodeCause, DecodeFailure, RecIndex, SchemeNames};
 use crate::ir::{
     Argv, CaseArm, Comp, CompKind, DefineSchemes, Exec, Explicit, Fields, Key, MapEntryV, Module,
-    Name, Node, Pattern, Phrase, Prim, Redirects, StderrTarget, StdinSource, Toplevel, Val,
-    ValListElem,
+    Name, Node, Pattern, Phrase, Prim, Redirects, StderrTarget, StdinSource, Toplevel,
+    UpdateFields, Val, ValListElem,
 };
 use crate::source::Spanned;
 use crate::ty::{Closed, Scheme, Site};
@@ -33,14 +33,14 @@ pub(super) fn admit_val(value: &Val<Explicit, RawData>) -> Result<Val, DecodeFai
             .map(|(index, value)| {
                 admit_spanned_val(value).map_err(|error| error.index(index.into()))
             })
-            .collect::<Result<Box<[_]>, _>>()
-            .map(Val::list)
+            .collect::<Result<_, _>>()
+            .map(|items| Val::List(Node::new(items)))
             .map_err(|error| error.payload("List")),
         Val::Record(node) => admit_sorted_fields(node.shape())
-            .map(Val::record)
+            .map(|fields| Val::Record(Node::new(fields)))
             .map_err(|error| error.payload("Record")),
         Val::Map(node) => admit_sorted_fields(node.shape())
-            .map(Val::map)
+            .map(|fields| Val::Map(Node::new(fields)))
             .map_err(|error| error.payload("Map")),
         Val::Variant { label, payload } => Ok(Val::Variant {
             label: label.clone(),
@@ -68,7 +68,8 @@ fn admit_spanned_val(
 
 type RawFields = [(Name, Spanned<Val<Explicit, RawData>>)];
 
-/// The fields of a record or map, which `MapRef::get` binary-searches.
+/// The fields of a record, map, `within` or `grant`: strictly ascending, as
+/// the persistent map they become is searched by key.
 fn admit_sorted_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
     let keys = fields.iter().map(|(key, _)| key);
     for (index, (before, key)) in keys.clone().zip(keys.skip(1)).enumerate() {
@@ -81,11 +82,11 @@ fn admit_sorted_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
             .index(0usize.into())
             .index((index + 1).into()));
     }
-    admit_fields(fields)
+    admit_entries(fields)
 }
 
 /// The fields of a record update: written order, each key once.
-fn admit_update_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
+fn admit_update_fields(fields: &RawFields) -> Result<UpdateFields, DecodeFailure> {
     let mut seen = HashSet::with_capacity(fields.len());
     for (index, (key, _)) in fields.iter().enumerate() {
         if !seen.insert(key) {
@@ -96,12 +97,14 @@ fn admit_update_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
             );
         }
     }
-    admit_fields(fields)
+    admit_entries(fields)
 }
 
-fn admit_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
+fn admit_entries<C: FromIterator<(Name, Spanned<Val>)>>(
+    entries: &RawFields,
+) -> Result<C, DecodeFailure> {
     on_json_stack(|| {
-        fields
+        entries
             .iter()
             .enumerate()
             .map(|(index, (name, value))| {

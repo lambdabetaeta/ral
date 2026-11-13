@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d50aa681
+generated_at_commit: 9290eb03
 generated_at_date: 2026-11-13
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -104,7 +104,8 @@ Refined by [[decisions/260925_within-dir-is-local-state|within-dir-is-local-stat
   `Frame::abandon` is its panic rule. Only `Seq` and a written `let` mark
   the abandoned tail; compiler-written binds do not.
 - **`try`.** `Frame::Try` passes values; on an error it enters a `try` call
-  site and calls the handler with the error record. Escapes pass through.
+  site and calls the handler with the error as plain record data. Escapes pass
+  through.
 - **`guard`.** Entry checks room for three frames, polls, shields the scope
   and pushes `Frame::Acquire`. Acquire's return restores the scope, pushes
   `Frame::Guard` and calls the body with the resource under a `guard` call
@@ -134,17 +135,18 @@ Refined by [[decisions/260925_within-dir-is-local-state|within-dir-is-local-stat
 
 ## Values and primitives
 
-- `runtime/value.rs`: `ValClos::close` closes one layer of syntax over ρ
-  restricted to its occurrences, pulling Σ's answers for missing direct
-  names; `ValClos::thunk` does the same for a computation. `View` reads one
-  layer; lists and maps expose `ListRef` / `MapRef`. See
+- `ir/value.rs`, `runtime/close.rs`: `ValClos::close` closes one layer of
+  syntax over ρ restricted to its occurrences, pulling Σ's answers for
+  missing direct names; `ValClos::thunk` does the same for a computation.
+  `VClosRef::view` reads a head constructor only; lists and maps expose
+  `ListRef` / `MapRef`. See
   [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]].
 - `expr.rs`: `eval_prim` interprets every `Prim` on values. `field`,
   `position` and `lookup` read `Key::{Label, Position, Data}`. `Decode`
   drops ρ before taking the bytes, strips one trailing terminator and
   decodes UTF-8 strictly.
 - `assemble.rs`: `eval_list`, `eval_update` and `eval_map` build collections
-  from already-run operands. A repeated computed map key fails here; known
+  from already-run operands, calling `ListRef`'s cons, snoc and concat. A repeated computed map key fails here; known
   duplicates are refused statically.
 - `pattern.rs`: `destructure` stages every binding of a
   `Pattern::{Wildcard, Name, List, Record}` before any is installed; a list

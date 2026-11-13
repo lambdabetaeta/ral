@@ -7,13 +7,12 @@ use crate::fact::{InvalidCause, Multiline, OperationState, Reason, StateFailure,
 use crate::handle::brood::{BroodGuard, BroodOwner, Cradle};
 use crate::handle::{HandleInner, Sample};
 use crate::io::{ByteBuffer, CapturedBytes, Streams, new_buffer};
+use crate::ir::{MapRef, VClosRef, View};
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::shell::runtime::{
-    Break, DeferredSink, End, Error, Escape, Map, MapRef, Owner, ReapCause, Stop, View, WatchEvent,
-    WorkerId,
+    Break, DeferredSink, End, Error, Escape, Owner, ReapCause, Stop, WatchEvent, WorkerId,
 };
 use crate::test_helper::SLEEP;
-use std::borrow::Cow;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -86,21 +85,25 @@ fn handle_with_panicked_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
     handle
 }
 
-fn expect_variant<'a>(v: &'a ValClos, label: &str) -> Cow<'a, ValClos> {
+fn expect_variant<'a>(v: impl Into<VClosRef<'a>>, label: &str) -> VClosRef<'a> {
+    let v = v.into();
     match v.view() {
-        View::Variant {
-            label: l,
-            payload: Some(p),
-        } if l.as_ref() == label => p,
+        View::Variant { label: l, payload } if l.as_ref() == label => payload,
         _ => panic!("expected `{label} with payload, got {v:?}"),
     }
 }
 
-fn expect_map(v: &ValClos) -> MapRef<'_> {
+fn expect_map<'a>(v: impl Into<VClosRef<'a>>) -> MapRef<'a> {
+    let v = v.into();
     match v.view() {
         View::Map(m) => m,
         _ => panic!("expected Map, got {v:?}"),
     }
+}
+
+/// A record's field, borrowed.
+fn field<'a>(record: &'a ValClos, key: &str) -> Option<VClosRef<'a>> {
+    expect_map(record).get(key)
 }
 
 /// The [`FOValue`] dual of [`expect_variant`].
@@ -209,10 +212,10 @@ fn a_cancelled_handle_is_claimed() {
 
     let stopping = builtin_poll(&args, &shell).expect("poll on a stopping handle is total");
     let stopping_payload = expect_variant(&stopping, "stopping");
-    let stopping_map = expect_map(&stopping_payload);
+    let stopping_map = expect_map(stopping_payload);
     assert_eq!(stopping_map.len(), 1);
     assert!(matches!(
-        stopping_map.get("elapsed").as_deref().map(ValClos::view),
+        stopping_map.get("elapsed").map(VClosRef::view),
         Some(View::Float(secs)) if secs.get() >= 0.0
     ));
     expect_claimed(
@@ -226,10 +229,10 @@ fn a_cancelled_handle_is_claimed() {
 
     let consumed = builtin_poll(&args, &shell).expect("poll on a consumed handle is total");
     let consumed_payload = expect_variant(&consumed, "consumed");
-    let consumed_map = expect_map(&consumed_payload);
+    let consumed_map = expect_map(consumed_payload);
     assert_eq!(consumed_map.len(), 1);
     assert!(matches!(
-        consumed_map.get("elapsed").as_deref().map(ValClos::view),
+        consumed_map.get("elapsed").map(VClosRef::view),
         Some(View::Float(secs)) if secs.get() >= 0.0
     ));
     expect_claimed(
@@ -621,45 +624,34 @@ fn run_framed(
 }
 
 /// The observations an `audit { }` report collected.
-fn trail_of(report: &ValClos) -> crate::shell::runtime::List {
-    expect_map(report)
-        .get("trail")
+fn trail_of(report: &ValClos) -> ValClos {
+    field(report, "trail")
         .expect("a report carries its trail")
-        .as_list("trail")
-        .expect("a trail is a List")
-        .to_list()
+        .into_owned()
 }
 
 /// The `` `worker `` facts of a trail — a birth is read by its tag.
-fn births(trail: &crate::shell::runtime::List) -> Vec<Map> {
+fn births(trail: &ValClos) -> Vec<ValClos> {
     trail
+        .as_list("trail")
+        .expect("a trail is a List")
         .iter()
         .filter_map(|o| {
             let View::Map(o) = o.view() else { return None };
-            let what = o.get("what")?;
-            let View::Variant {
-                label,
-                payload: Some(fact),
-            } = what.view()
-            else {
+            let View::Variant { label, payload } = o.get("what")?.view() else {
                 return None;
             };
-            if label.as_ref() != "worker" {
-                return None;
-            }
-            let View::Map(fact) = fact.view() else {
-                return None;
-            };
-            Some(fact.to_map())
+            (label.as_ref() == "worker" && matches!(payload.view(), View::Map(_)))
+                .then(|| payload.into_owned())
         })
         .collect()
 }
 
 /// The one `` `worker `` fact of an `audit { }` report's trail, panicking
 /// if there is not exactly one.
-fn only_birth(trail: &crate::shell::runtime::List) -> Map {
+fn only_birth(trail: &ValClos) -> ValClos {
     match births(trail).as_mut_slice() {
-        [birth] => std::mem::take(birth),
+        [birth] => std::mem::replace(birth, ValClos::UNIT),
         other => panic!("expected exactly one worker birth, got {other:?}"),
     }
 }
@@ -675,11 +667,11 @@ fn audit_over_spawn_carries_the_birth_id_and_all() {
         .expect("audit over a plain spawn must succeed");
     let birth = only_birth(&trail_of(&report));
     assert_eq!(
-        birth.get("title"),
-        Some(&ValClos::string("block at <test>, line 1"))
+        field(&birth, "title").map(VClosRef::into_owned),
+        Some(ValClos::string("block at <test>, line 1"))
     );
     assert!(
-        matches!(birth.get("id").map(ValClos::view), Some(View::Int(_))),
+        matches!(field(&birth, "id").map(VClosRef::view), Some(View::Int(_))),
         "the birth carries the minted worker id: {birth:?}"
     );
 }
@@ -693,24 +685,19 @@ fn cap_refused_spawn_observes_no_birth() {
     let report = run_captured(&mut shell, "audit { !{spawn { return 1 }} }", Some(0))
         .0
         .expect("audit swallows the refusal as data, not an error");
-    let outcome_field = expect_map(&report).get("outcome");
-    let outcome = outcome_field
-        .as_deref()
-        .expect("a report carries its outcome");
-    let payload = expect_variant(outcome, "err");
-    let error = expect_map(&payload);
+    let outcome = field(&report, "outcome").expect("a report carries its outcome");
+    let error = expect_map(expect_variant(outcome, "err"));
+    let reason = Reason::State(Box::new(StateFailure::WorkerCap(WorkerCap {
+        limit: 0usize.into(),
+    })));
     assert_eq!(
-        error.witness().map(crate::fact::ErrorFact::reason),
-        Some(&Reason::State(Box::new(StateFailure::WorkerCap(
-            WorkerCap {
-                limit: 0usize.into()
-            }
-        )))),
+        error.get("message").map(VClosRef::into_owned),
+        Some(ValClos::string(reason.describe().into_owned())),
         "the refused spawn's reason"
     );
     assert_eq!(
-        error.get("frame").as_deref(),
-        Some(&ValClos::string("spawn"))
+        error.get("frame").map(VClosRef::into_owned),
+        Some(ValClos::string("spawn"))
     );
     let trail = trail_of(&report);
     assert!(
@@ -751,8 +738,8 @@ fn a_worker_uses_a_closed_module() {
         .0
         .expect("the worker must load the module");
     assert_eq!(
-        expect_map(&awaited).get("v").as_deref(),
-        Some(&ValClos::int(7))
+        field(&awaited, "v").map(VClosRef::into_owned),
+        Some(ValClos::int(7))
     );
 }
 
@@ -942,11 +929,7 @@ fn poll_reports_elapsed_on_both_arms() {
     let args = [ValClos::handle(handle.clone())];
     let elapsed = |polled: &ValClos, arm: &str| {
         let payload = expect_variant(polled, arm);
-        match expect_map(&payload)
-            .get("elapsed")
-            .as_deref()
-            .map(ValClos::view)
-        {
+        match expect_map(payload).get("elapsed").map(VClosRef::view) {
             Some(View::Float(secs)) => secs.get(),
             _ => panic!("expected a Float `elapsed`, got {payload:?}"),
         }
@@ -1288,10 +1271,10 @@ fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
         "the receipt is a pid and a desc, and nothing else: {born:?}"
     );
     assert_eq!(
-        fields.get("desc").as_deref(),
-        Some(&ValClos::string("the greeter"))
+        fields.get("desc").map(VClosRef::into_owned),
+        Some(ValClos::string("the greeter"))
     );
-    assert!(matches!(fields.get("pid").as_deref().map(ValClos::view), Some(View::Int(p)) if p > 0));
+    assert!(matches!(fields.get("pid").map(VClosRef::view), Some(View::Int(p)) if p > 0));
 }
 
 #[test]
@@ -1335,9 +1318,9 @@ fn a_timed_out_workers_done_poll_and_await_records_are_identical() {
     let (polled, _) = run_captured(&mut shell, "poll $h", None);
     let polled = polled.expect("poll");
     let ready = expect_variant(&polled, "ready");
-    let outcome = expect_map(&ready).get("outcome").unwrap().into_owned();
+    let outcome = expect_map(ready).get("outcome").unwrap();
     let polled = crate::fact::ErrorRecord::decode(
-        &FOValue::try_from(expect_variant(&outcome, "err").as_ref()).expect("data"),
+        &FOValue::try_from(expect_variant(outcome, "err")).expect("data"),
     )
     .expect("poll record");
     let (awaited, _) = run_captured(
@@ -1384,10 +1367,10 @@ fn an_unlocated_worker_error_is_completed_before_any_observer_sees_it() {
     let _observed_at = shell.local.audit.enter_site(observer);
     let poll = builtin_poll(&[ValClos::handle(handle.clone())], &shell).expect("poll");
     let ready = expect_variant(&poll, "ready");
-    let outcome = expect_map(&ready).get("outcome").unwrap().into_owned();
+    let outcome = expect_map(ready).get("outcome").unwrap();
     assert_eq!(
-        expect_variant(&outcome, "err").as_ref(),
-        &ValClos::failure(expected.clone())
+        expect_variant(outcome, "err"),
+        VClosRef::from(&ValClos::from_datum(expected.record()))
     );
     let Break::Error(awaited) = await_handle(&handle, "await", &mut shell).unwrap_err() else {
         panic!("worker error")
@@ -2455,7 +2438,7 @@ fn a_spawn_is_named_by_its_title_or_its_line() {
         let report = run_captured(shell, src, None)
             .0
             .expect("audit over a spawn must succeed");
-        only_birth(&trail_of(&report)).get("title").cloned()
+        field(&only_birth(&trail_of(&report)), "title").map(VClosRef::into_owned)
     };
     assert_eq!(
         title(&mut shell, "audit { spawn \"named\" { return 1 } }"),
@@ -2472,7 +2455,7 @@ fn an_untitled_spawn_is_refused_where_titles_are_required() {
     let mut shell = crate::test_helper::core_shell();
     let mut m = Mooring::adrift();
     m.worker_title = TitlePolicy::Required;
-    let body = crate::shell::runtime::block_over(&shell.env);
+    let body = crate::ir::block_over(&shell.env);
     match spawn_form(None, &body, &m, &mut shell) {
         Err(Break::Error(e)) => {
             let Reason::Invalid(failure) = &e.reason else {
@@ -2818,8 +2801,8 @@ fn a_spawn_inside_a_worker_is_not_announced() {
     .0
     .expect("audit over the spawn must succeed");
     assert_eq!(
-        only_birth(&trail_of(&report)).get("title"),
-        Some(&ValClos::string("outer"))
+        field(&only_birth(&trail_of(&report)), "title").map(VClosRef::into_owned),
+        Some(ValClos::string("outer"))
     );
     let dones = batches
         .lock()
@@ -3498,8 +3481,8 @@ fn non_cooperative_worker_outliving_grace_stays_stopping_and_consumes_cap() {
     assert_eq!(listed.len(), 1);
     let row = listed.iter().next().unwrap();
     assert_eq!(
-        expect_map(&row).get("state").as_deref(),
-        Some(&ValClos::variant("stopping", None))
+        expect_map(row).get("state").map(VClosRef::into_owned),
+        Some(ValClos::variant("stopping", None))
     );
 
     m.worker_cap = Some(1);
@@ -3802,12 +3785,13 @@ fn typed_worker_io_reason_survives_done_poll_and_await_with_report_fields_separa
     wait_settled(&handle);
     let polled = builtin_poll(&[ValClos::handle(handle.clone())], &shell).unwrap();
     let ready = expect_variant(&polled, "ready");
-    let outcome = expect_map(&ready).get("outcome").unwrap().into_owned();
-    let record = expect_map(&expect_variant(&outcome, "err"))
-        .witness()
-        .expect("a polled failure is witnessed")
-        .clone();
-    assert_eq!(record.reason(), &reason);
+    let outcome = expect_map(ready).get("outcome").unwrap();
+    let record = <crate::fact::ErrorRecord as crate::data::datum::Datum>::decode(
+        &FOValue::try_from(expect_variant(outcome, "err")).expect("data"),
+    )
+    .expect("a polled failure is an error record");
+    assert_eq!(record.message, reason.describe());
+    assert_eq!(record.status, reason.failure_code());
     let done = wait_for_batch(&batches)
         .into_iter()
         .flatten()
@@ -3816,7 +3800,7 @@ fn typed_worker_io_reason_survives_done_poll_and_await_with_report_fields_separa
     let Done::Err(done_record) = done.outcome else {
         panic!("typed worker failure")
     };
-    assert_eq!(done_record, record.record());
+    assert_eq!(done_record, record);
     let Break::Error(awaited) = await_handle(&handle, "await", &mut shell).unwrap_err() else {
         panic!("worker I/O failure")
     };
@@ -3827,5 +3811,5 @@ fn typed_worker_io_reason_survives_done_poll_and_await_with_report_fields_separa
         &[Box::<str>::from("check this session's output destination")]
     );
     assert!(matches!(awaited.reason, Reason::Io(ref io) if *io.cause.leaf == IoLeaf::Torn));
-    assert_eq!(awaited.fact(&shell), record);
+    assert_eq!(awaited.fact(&shell).record(), record);
 }

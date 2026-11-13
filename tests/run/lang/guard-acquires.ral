@@ -29,7 +29,7 @@ let rethrow = { |_ end| case $end [
 ] }
 try { guard { () } { |_| ^false } $rethrow } { |e| echo "command status $e[status]" }
 
-# A release can re-raise the exact witnessed record, not a fresh claim.
+# A release's `raise` keeps the record's frame, message, status and site.
 let original = try { ^false; fail 'false unexpectedly succeeded' } { |e| return $e }
 let reraised = try {
     guard { () } { |_| raise $original } $rethrow

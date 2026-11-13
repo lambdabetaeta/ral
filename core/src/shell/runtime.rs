@@ -3,17 +3,12 @@
 //! A re-export façade: every type lives in a private submodule and is named
 //! through this path, so the rest of the tree never tracks which one owns what.
 
-mod env;
-pub use env::{Binding, Env};
-
 pub(crate) mod signature;
 pub(crate) use signature::{PreludeMap, Signature, lookup};
 
-mod value;
-pub(crate) use value::Held;
-pub use value::{ValClos, View};
-#[cfg(test)]
-pub(crate) use value::{block_over, captured, deep_block_chain};
+mod close;
+mod compare;
+mod union;
 
 // What the exec boundary refuses, declared once for the two sides that read it:
 // the checker before the spawn, `shell::exec::command::check_argv` at it.
@@ -28,12 +23,6 @@ pub use admit::Mismatch;
 pub(crate) use admit::pointer_token;
 
 pub use crate::typecheck::builtins::Convention;
-
-mod list;
-pub use list::{List, ListRef};
-
-mod map;
-pub use map::{Map, MapRef};
 
 // Shared byte strings.
 pub use crate::data::Bytes;

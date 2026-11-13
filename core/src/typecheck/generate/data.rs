@@ -2,7 +2,8 @@
 
 use super::Generator;
 use crate::ir::{
-    ArithOp, BinaryOp, FieldsNode, Key, MapEntryV, Name, Prim, Val, ValListElem, is_synthetic,
+    ArithOp, BinaryOp, Fields, FieldsNode, Key, MapEntryV, Name, Prim, UpdateFields, Val,
+    ValListElem, is_synthetic,
 };
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Kind, Label, Row, Ty};
@@ -59,47 +60,40 @@ impl Generator {
         })
     }
 
-    fn record_field(
-        &mut self,
-        key: &str,
-        value: &Spanned<Val>,
-        fields: &mut Vec<(String, Ty)>,
-    ) -> Spanned<Val<Inferring>> {
-        let (duplicate, ty, node) = self.with_span(value.span, |this| {
-            let duplicate = this.diagnose_if_duplicate(key, fields.iter().map(|(k, _)| k.as_str()));
-            let (ty, node) = this.val(&value.item, value.span);
-            (duplicate, ty, node)
-        });
-        if !duplicate {
-            fields.push((key.to_string(), ty));
-        }
-        Spanned::with_span(value.span, node)
+    fn field_val(&mut self, value: &Spanned<Val>) -> (Ty, Spanned<Val<Inferring>>) {
+        let (ty, node) = self.with_span(value.span, |this| this.val(&value.item, value.span));
+        (ty, Spanned::with_span(value.span, node))
     }
 
-    fn record_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> (Ty, Arc<FieldsNode<Inferring>>) {
-        let mut fields: Vec<(String, Ty)> = Vec::new();
-        let nodes = entries
+    fn record_val(&mut self, entries: &Fields) -> (Ty, Arc<FieldsNode<Inferring>>) {
+        let (fields, nodes): (Vec<_>, Fields<Inferring>) = entries
             .iter()
-            .map(|(key, value)| (key.clone(), self.record_field(key, value, &mut fields)))
-            .collect();
+            .map(|(key, value)| {
+                let (ty, node) = self.field_val(value);
+                ((key.to_string(), ty), (key.clone(), node))
+            })
+            .unzip();
         (
             Ty::record(Self::fields_row(fields, Row::empty())),
             FieldsNode::new(nodes),
         )
     }
 
-    fn update(
-        &mut self,
-        base: &Spanned<Val>,
-        entries: &[(Name, Spanned<Val>)],
-    ) -> (Ty, Prim<Inferring>) {
+    fn update(&mut self, base: &Spanned<Val>, entries: &UpdateFields) -> (Ty, Prim<Inferring>) {
         let (base_ty, base_node) =
             self.with_span(base.span, |this| this.val(&base.item, base.span));
-        let mut fields = Vec::new();
-        let nodes = entries
-            .iter()
-            .map(|(key, value)| (key.clone(), self.record_field(key, value, &mut fields)))
-            .collect();
+        let mut fields: Vec<(String, Ty)> = Vec::new();
+        let mut nodes = Vec::new();
+        for (key, value) in entries {
+            let duplicate = self.with_span(value.span, |this| {
+                this.diagnose_if_duplicate(key, fields.iter().map(|(seen, _)| seen.as_str()))
+            });
+            let (ty, node) = self.field_val(value);
+            if !duplicate {
+                fields.push((key.to_string(), ty));
+            }
+            nodes.push((key.clone(), node));
+        }
         let tail = self.solver.fresh_row();
         let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
             let old = self.solver.fresh_ty();
@@ -115,28 +109,24 @@ impl Generator {
             Ty::record(Self::fields_row(fields, tail)),
             Prim::Update {
                 base: Spanned::with_span(base.span, base_node),
-                fields: nodes,
+                fields: nodes.into(),
             },
         )
     }
 
-    fn map_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> (Ty, Arc<FieldsNode<Inferring>>) {
+    fn map_val(&mut self, entries: &Fields) -> (Ty, Arc<FieldsNode<Inferring>>) {
         let elem = self.solver.fresh_ty();
-        let mut seen: Vec<Name> = Vec::new();
-        let mut nodes = Vec::new();
-        for (key, value) in entries {
-            let (duplicate, node) = self.with_span(value.span, |this| {
-                let duplicate = this.diagnose_if_duplicate(key, seen.iter().map(AsRef::as_ref));
-                let (value_ty, node) = this.val(&value.item, value.span);
-                this.solver.equate(&value_ty, &elem, Reason::MapElem);
-                (duplicate, node)
-            });
-            if !duplicate {
-                seen.push(key.clone());
-            }
-            nodes.push((key.clone(), Spanned::with_span(value.span, node)));
-        }
-        (Ty::map(elem), FieldsNode::new(nodes.into()))
+        let nodes = entries
+            .iter()
+            .map(|(key, value)| {
+                let (value_ty, node) = self.field_val(value);
+                self.with_span(value.span, |this| {
+                    this.solver.equate(&value_ty, &elem, Reason::MapElem);
+                });
+                (key.clone(), node)
+            })
+            .collect();
+        (Ty::map(elem), FieldsNode::new(nodes))
     }
 
     fn map(&mut self, entries: &[MapEntryV]) -> (Ty, Prim<Inferring>) {
@@ -511,6 +501,15 @@ mod tests {
     use crate::typecheck::solve::{ArgvBoundary, Solver};
     use std::borrow::Cow;
 
+    fn fields(entries: Vec<(&str, Spanned<Val>)>) -> Arc<FieldsNode> {
+        FieldsNode::new(
+            entries
+                .into_iter()
+                .map(|(key, value)| (Name::from(key), value))
+                .collect(),
+        )
+    }
+
     fn generator() -> Generator {
         Generator::new(Solver::new(), TyEnv::new(), Vec::new())
     }
@@ -644,13 +643,10 @@ mod tests {
     #[test]
     fn update_replaces_a_slot_type_but_preserves_the_other_fields() {
         let mut generator = generator();
-        let base = Val::Record(FieldsNode::new(
-            vec![
-                ("change".into(), value(1, Val::Int(1))),
-                ("keep".into(), value(2, Val::Bool(true))),
-            ]
-            .into(),
-        ));
+        let base = Val::Record(fields(vec![
+            ("change", value(1, Val::Int(1))),
+            ("keep", value(2, Val::Bool(true))),
+        ]));
         let (ty, node) = generator.prim(&Prim::Update {
             base: value(0, base),
             fields: vec![("change".into(), value(3, Val::String("new".into())))].into(),
@@ -664,36 +660,43 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_static_keys_are_diagnosed_for_records_and_both_map_forms() {
-        for form in 0..3 {
+    fn duplicate_static_keys_are_diagnosed_in_updates_and_written_maps() {
+        for form in 0..2 {
             let mut generator = generator();
-            let entries = vec![
-                ("same".into(), value(1, Val::Int(1))),
-                ("same".into(), value(2, Val::Int(2))),
-            ];
             match form {
                 0 => {
-                    generator.val(&Val::Record(FieldsNode::new(entries.into())), None);
-                }
-                1 => {
-                    generator.val(&Val::Map(FieldsNode::new(entries.into())), None);
+                    let base = Val::Record(fields(vec![("same", value(0, Val::Int(0)))]));
+                    generator.prim(&Prim::Update {
+                        base: value(0, base),
+                        fields: vec![
+                            ("same".into(), value(1, Val::Int(1))),
+                            ("same".into(), value(2, Val::Int(2))),
+                        ]
+                        .into(),
+                    });
                 }
                 _ => {
-                    let entries = entries
-                        .into_iter()
-                        .map(|(key, v): (Name, _)| {
-                            MapEntryV::Entry(value(0, Val::String(key.as_ref().into())), v)
-                        })
-                        .collect();
-                    generator.prim(&Prim::Map(entries));
+                    generator.prim(&Prim::Map(
+                        vec![
+                            MapEntryV::Entry(
+                                value(0, Val::String("same".into())),
+                                value(1, Val::Int(1)),
+                            ),
+                            MapEntryV::Entry(
+                                value(3, Val::String("same".into())),
+                                value(2, Val::Int(2)),
+                            ),
+                        ]
+                        .into(),
+                    ));
                 }
             }
             let errors = generator.solver.refused().1;
-            assert_eq!(errors.len(), 1);
+            assert_eq!(errors.len(), 1, "{errors:?}");
             assert!(
                 matches!(&errors[0].kind, TypeErrorKind::DuplicateField { label } if label == "same")
             );
-            assert_eq!(errors[0].pos, Some(if form == 2 { at(0) } else { at(2) }));
+            assert_eq!(errors[0].pos, Some(if form == 0 { at(2) } else { at(3) }));
         }
     }
 
@@ -707,9 +710,7 @@ mod tests {
             ]
             .into(),
         ));
-        let spread = Val::Map(FieldsNode::new(
-            vec![("b".into(), value(4, Val::Bool(false)))].into(),
-        ));
+        let spread = Val::Map(fields(vec![("b", value(4, Val::Bool(false)))]));
         let (map, _) = generator.prim(&Prim::Map(
             vec![
                 MapEntryV::Entry(value(5, Val::String("a".into())), value(6, Val::Bool(true))),

@@ -678,7 +678,7 @@ fn a_socket_write_grant_admits_only_its_opened_file() {
     use crate::authority::grant::freeze::FreezeCtx;
     use crate::authority::policy::Baseline;
     use crate::authority::sandbox::SandboxProjection;
-    use crate::shell::runtime::ValClos;
+    use crate::ir::ValClos;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::UnixListener;
 
@@ -686,12 +686,7 @@ fn a_socket_write_grant_admits_only_its_opened_file() {
     let path = tmp.path().join("socket");
     let _server = UnixListener::bind(&path).unwrap();
     let record = |entries: Vec<(&str, ValClos)>| {
-        ValClos::map(
-            entries
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v))
-                .collect(),
-        )
+        ValClos::map(entries.into_iter().map(|(k, v)| (k.to_owned(), v)))
     };
     let grant = record(vec![(
         "fs",

@@ -583,8 +583,8 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   given no arguments, which was most likely meant as text: to a refused
   admission, and to a run that named a directory or plain file. It is appended
   after the denial's intrinsic remedy, never before it.
-- A handler's re-raise keeps the record, so its advice is recomputed, and
-  drops the stored hints.
+- A handler's `raise` of the record is a claim: it carries no typed reason, so
+  no intrinsic advice, and drops the stored hints.
 
 ### Who observes the ending
 

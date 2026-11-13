@@ -68,11 +68,13 @@ spawned block shares nothing mutable.
   direct names into ρ. A name under a thunk is not direct: it resolves ρ
   then Σ when the thunk runs. Σ is the shell's fixed builtin and prelude
   signature, not a captured mutable store.
-- Reading a component distributes the saved environment one layer:
-  `read(x,ρ) = ρ(x)`; otherwise `read(V′,ρ) = ⟨V′,ρ⟩`. No re-restriction or
-  Σ lookup occurs. Built lists and maps realise closures over implicit fresh
-  variables using persistent vectors and ordered maps
-  ([[internals/evaluator-machine|evaluator-machine]]).
+- Reading a component shares the saved environment: a variable `x` is its
+  binding `ρ(x)`; otherwise the component V′ is `⟨V′,ρ⟩`. No re-restriction
+  or Σ lookup occurs, and a head reads no deeper than its own constructor.
+  Lists and maps built at run time are ordinary syntax over fresh variables
+  bound in ρ, held as persistent vectors and ordered maps
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]],
+  [[internals/evaluator-machine|evaluator-machine]]).
 - Machine state is a computation closure or `Err(Break)` only. A produced
   value passes to frames through `settle` in the same step; it is never
   stored as control or wrapped in newly constructed `return` syntax. See

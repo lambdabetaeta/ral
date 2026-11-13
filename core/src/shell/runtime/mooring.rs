@@ -4,8 +4,8 @@
 
 use super::Error;
 use super::flow::Settled;
-use super::value::ValClos;
 use crate::fact::{Reason, StateFailure};
+use crate::ir::ValClos;
 use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode, TerminalAccess};
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,7 +187,7 @@ impl Mooring {
     /// crosses as its `opaque` placeholder rather than being dropped.
     pub fn surface(&self, ev: &ValClos) {
         if let Some(sink) = self.surface.as_ref() {
-            sink.emit(&crate::data::FOValue::scrubbed(ev));
+            sink.emit(&crate::data::FOValue::scrubbed(ev.into()));
         }
     }
 

@@ -4,9 +4,8 @@
 
 use crate::environ::EnvVars;
 use crate::fact::{Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape};
-use crate::shell::runtime::{
-    Error, FrameHandle, HandlerEntry, MapRef, Settled, Shell, ValClos, View,
-};
+use crate::ir::{MapRef, VClosRef, ValClos, View};
+use crate::shell::runtime::{Error, FrameHandle, HandlerEntry, Settled, Shell};
 
 use crate::path::{CwdPath, Reading};
 
@@ -28,10 +27,10 @@ impl WithinScope {
         let mut saw_handlers = false;
         let mut entries = Vec::new();
 
-        for (k, v) in opts {
+        for (k, v) in opts.iter() {
             match k {
-                "env" => env_overrides = Some(parse_env(&v)?),
-                "dir" => cwd = Some(parse_dir(&v, shell)?),
+                "env" => env_overrides = Some(parse_env(v)?),
+                "dir" => cwd = Some(parse_dir(v, shell)?),
                 "handler" => {
                     catch_all = Some(v.into_owned());
                     saw_handlers = true;
@@ -85,7 +84,7 @@ impl WithinScope {
 }
 
 /// `env:` — a map of scalar overrides.
-fn parse_env(v: &ValClos) -> Settled<EnvVars> {
+fn parse_env(v: VClosRef<'_>) -> Settled<EnvVars> {
     let mut env = EnvVars::new();
     let View::Map(values) = v.view() else {
         return Err(Error::new(Reason::Invalid(Box::new(
@@ -100,7 +99,7 @@ fn parse_env(v: &ValClos) -> Settled<EnvVars> {
         )))
         .into());
     };
-    for (name, value) in values {
+    for (name, value) in values.iter() {
         let text = value.scalar_text().ok_or_else(|| {
             Error::new(Reason::Invalid(Box::new(
                 InvalidFailure::new(
@@ -137,7 +136,7 @@ fn parse_env(v: &ValClos) -> Settled<EnvVars> {
 /// directory, and to be one a path can be read against ([`CwdPath`]), before
 /// the body runs rather than at the first command.  The cwd is where the
 /// directory is.
-fn parse_dir(v: &ValClos, shell: &mut Shell) -> Settled<CwdPath> {
+fn parse_dir(v: VClosRef<'_>, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
         return Err(Error::new(Reason::Invalid(Box::new(
@@ -212,7 +211,6 @@ mod tests {
                 if label.as_ref() != "command" {
                     return None;
                 }
-                let payload = payload?;
                 let fact = payload.as_map("test").ok()?;
                 let argv = fact.get("argv")?;
                 let argv = argv.as_list("test").ok()?;
@@ -453,30 +451,28 @@ mod tests {
             *f
         };
         assert_eq!(
-            failure(parse_env(&ValClos::int(1))).path,
+            failure(parse_env((&ValClos::int(1)).into())).path,
             vec![DataStep::Field("env".into())]
         );
-        let scalar = failure(parse_env(&ValClos::map(vec![(
-            "X".into(),
-            ValClos::list(vec![]),
-        )])));
+        let scalar = failure(parse_env(
+            (&ValClos::map(vec![("X".into(), ValClos::list(vec![]))])).into(),
+        ));
         assert_eq!(scalar.operation, "within");
         assert_eq!(
             scalar.path,
             vec![DataStep::Field("env".into()), DataStep::Field("X".into())]
         );
         assert!(matches!(scalar.cause, InvalidCause::Shape(_)));
-        let reserved = failure(parse_env(&ValClos::map(vec![(
-            "PWD".into(),
-            ValClos::string("/tmp"),
-        )])));
+        let reserved = failure(parse_env(
+            (&ValClos::map(vec![("PWD".into(), ValClos::string("/tmp"))])).into(),
+        ));
         assert_eq!(
             reserved.cause,
             InvalidCause::ReservedEnvironment(ReservedVar::Pwd)
         );
         let mut shell = crate::test_helper::core_shell();
         let Err(crate::shell::runtime::Break::Error(error)) =
-            parse_dir(&ValClos::string(""), &mut shell)
+            parse_dir((&ValClos::string("")).into(), &mut shell)
         else {
             panic!("empty directory")
         };

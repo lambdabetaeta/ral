@@ -4,14 +4,14 @@
 //! non-UTF-8 name keeps the native bytes and refuses a match it cannot show.
 
 use ral_core::ValClos;
+#[cfg(unix)]
+use ral_core::View;
 #[cfg(target_os = "linux")]
 use ral_core::path::CwdPath;
 use ral_core::protocol::Run;
 #[cfg(target_os = "linux")]
 use ral_core::shell::run::RunReport;
 use ral_core::shell::runtime::Settled;
-#[cfg(unix)]
-use ral_core::shell::runtime::View;
 use ral_core::source::SourceOrigin;
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
@@ -317,7 +317,7 @@ fn assert_fs_denial(dir: &Path, body: &str) {
     let checks: Vec<_> = trail
         .iter()
         .filter_map(|fact| {
-            let fact = FOValue::try_from(fact.as_ref()).unwrap();
+            let fact = FOValue::try_from(fact).unwrap();
             match Observation::decode(&fact).unwrap().what {
                 Observed::Check(check) => Some(check),
                 _ => None,

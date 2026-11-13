@@ -5,10 +5,10 @@ pub mod profile;
 use crate::compile::{CompileError, UseRefusal, compile_and_typecheck};
 use crate::error::Prov;
 use crate::fact::{InvalidCause, InvalidFailure, IoOperation, IoSubject, Reason};
-use crate::ir::{Module, Toplevel};
+use crate::ir::{Env, Module, Toplevel, ValClos};
 use crate::path::{Judged, LeafMode, Located, Reading, walk_lenient};
 use crate::shell::evaluator::{Mode, Ran, run_phrases};
-use crate::shell::runtime::{Break, Env, Error, Mooring, Settled, Shell, ValClos};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::source::{FileId, Source, SourceFile, SourceOrigin, Span};
 use crate::typecheck::{SessionSchemes, Table, Unit};
 use std::path::Path;
@@ -79,8 +79,7 @@ pub(crate) fn run_module(
                     .expect("a checked module's successful definition is bound")
                     .clone();
                 (name.to_owned(), value)
-            })
-            .collect(),
+            }),
     ))
 }
 

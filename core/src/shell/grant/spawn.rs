@@ -131,7 +131,7 @@ mod tests {
     use crate::fact::{
         ExarchFailure, HostFailure, PolicyFailure, PolicyFailureUnknownBase, Reason,
     };
-    use crate::shell::runtime::ValClos;
+    use crate::ir::ValClos;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.

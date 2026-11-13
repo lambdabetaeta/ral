@@ -31,10 +31,7 @@ use ral_core::shell::run::RunReport;
 use ral_core::shell::runtime::{Break, Shell};
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::eventually;
-use ral_core::{
-    RunIo, ValClos,
-    shell::{builtins, runtime::View},
-};
+use ral_core::{RunIo, ValClos, View, shell::builtins};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::Duration;
@@ -436,7 +433,8 @@ fn a_denied_detach_leaves_one_check_without_args() {
     assert_eq!(checks.len(), 1, "one refusal, one check: {events:?}");
     let fields = crate::common::check_fields(&checks[0].0);
     assert!(
-        fields.get("name").is_some() && fields.get("args").is_none(),
+        crate::common::field(&fields, "name").is_some()
+            && crate::common::field(&fields, "args").is_none(),
         "{fields:?}"
     );
 }

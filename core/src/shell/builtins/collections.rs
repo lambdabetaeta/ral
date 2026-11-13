@@ -10,9 +10,10 @@ use crate::fact::{
     AddressableRange, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, Utf8Subject,
     ValueShape,
 };
+use crate::ir::{ValClos, View};
 use crate::shell::evaluator::{apply, expr};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, ValClos, View};
+use crate::shell::runtime::{Break, Mooring, Settled, Shell};
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
 /// single push, which an unconditional poll would dominate.  The combinators
@@ -85,7 +86,7 @@ pub(super) fn builtin_filter(
     let kept = items
         .iter()
         .filter_map(
-            |item| match call(&args[0], item.as_ref().clone(), mooring, shell) {
+            |item| match call(&args[0], item.into_owned(), mooring, shell) {
                 Ok(result) => match result.view() {
                     View::Bool(keep) => keep.then(|| Ok(item.into_owned())),
                     _ => Some(Err(result
@@ -183,7 +184,7 @@ pub(super) fn builtin_fold(
     let func = &args[0];
     let mut acc = args[1].clone();
     let items = args[2].as_list("fold")?;
-    for item in items {
+    for item in items.iter() {
         shell.poll()?;
         acc = apply(func, vec![acc, item.into_owned()], mooring, shell)?;
     }

@@ -19,7 +19,8 @@ use crate::fact::{Io, OperationState, Reason, StateFailure};
 use crate::handle::brood::stop_and_drain;
 use crate::handle::{CompletedHandle, HandleInner, Sample};
 use crate::io::{Retained, Streams};
-use crate::shell::runtime::{Mooring, Owner, Settled, Shell, ValClos, View, outcome_value};
+use crate::ir::{ValClos, View};
+use crate::shell::runtime::{Mooring, Owner, Settled, Shell, outcome_value};
 
 /// `cancel <handle>` -- claim a concurrent block and stop it and everything it
 /// started; nothing if its result was already claimed.
@@ -266,7 +267,7 @@ fn beside<const N: usize>(io: Io, more: [(&str, ValClos); N]) -> ValClos {
     };
     let fields = m.iter().map(|(k, v)| (k.to_string(), v.into_owned()));
     let more = more.into_iter().map(|(k, v)| (k.to_string(), v));
-    ValClos::map(fields.chain(more).collect())
+    ValClos::map(fields.chain(more))
 }
 
 /// The closed `[elapsed: Float]` record `poll` carries in its `stopping` and

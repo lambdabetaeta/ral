@@ -4,13 +4,12 @@ use super::wire::{self, RawData, Row, RowId, Value, Wire};
 use crate::builtin::BuiltinEntry;
 use crate::data::json::JsonRef;
 use crate::fact::{
-    DecodeCause, DecodeFailure, Expected, InvalidResidual, RowDefect, RowKind, ShapeFailure,
-    UnresolvedRow, ValueShape,
+    DecodeCause, DecodeFailure, Expected, InvalidResidual, RowDefect, ShapeFailure, UnresolvedRow,
+    ValueShape,
 };
+use crate::ir::{Binding, Env, ValClos, View};
 use crate::shell::grant::SpawnGrant;
-use crate::shell::runtime::{
-    Binding, Env, HandlerEntry, HandlerFrame, Image, Runtime, Signature, ValClos, View,
-};
+use crate::shell::runtime::{HandlerEntry, HandlerFrame, Image, Runtime, Signature};
 use crate::ty::Closed;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -96,28 +95,22 @@ pub(super) fn image(
     ))
 }
 
-enum Read {
-    Env(Env),
-    Built(ValClos),
-}
-
 struct Reader<'a> {
     sig: &'a Signature,
     /// Every row of the document, read or not.
     total: usize,
-    rows: Vec<Read>,
+    rows: Vec<Env>,
 }
 
-fn unresolved(row: RowId, wanted: RowKind, defect: RowDefect) -> DecodeFailure {
+fn unresolved(row: RowId, defect: RowDefect) -> DecodeFailure {
     DecodeFailure::new(DecodeCause::UnresolvedRow(UnresolvedRow {
         row: u64::from(row).into(),
-        wanted,
         defect,
     }))
 }
 
 impl Reader<'_> {
-    fn earlier(&self, row: RowId) -> Result<&Read, RowDefect> {
+    fn earlier(&self, row: RowId) -> Result<&Env, RowDefect> {
         let index = usize::try_from(row).unwrap_or(usize::MAX);
         self.rows.get(index).ok_or_else(|| {
             if index < self.total {
@@ -132,27 +125,9 @@ impl Reader<'_> {
         let Some(row) = row else {
             return Ok(Env::EMPTY);
         };
-        match self.earlier(row) {
-            Ok(Read::Env(env)) => Ok(env.clone()),
-            Ok(Read::Built(_)) => Err(unresolved(
-                row,
-                RowKind::Environment,
-                RowDefect::WrongKind(RowKind::Built),
-            )),
-            Err(defect) => Err(unresolved(row, RowKind::Environment, defect)),
-        }
-    }
-
-    fn built(&self, row: RowId) -> Result<ValClos, DecodeFailure> {
-        match self.earlier(row) {
-            Ok(Read::Built(value)) => Ok(value.clone()),
-            Ok(Read::Env(_)) => Err(unresolved(
-                row,
-                RowKind::Built,
-                RowDefect::WrongKind(RowKind::Environment),
-            )),
-            Err(defect) => Err(unresolved(row, RowKind::Built, defect)),
-        }
+        self.earlier(row)
+            .cloned()
+            .map_err(|defect| unresolved(row, defect))
     }
 
     /// Σ's own value for `name`, so a residual's identity check holds.
@@ -166,61 +141,30 @@ impl Reader<'_> {
             .ok_or_else(|| DecodeFailure::new(DecodeCause::UnknownBuiltin(name.into())))
     }
 
-    fn row(&self, row: &Row<RawData>) -> Result<Read, DecodeFailure> {
-        match row {
-            Row::Env(entries) => {
-                let bindings = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (name, binding))| {
-                        self.binding(binding)
-                            .map(|binding| (name.as_str().into(), binding))
-                            .map_err(|error| error.index(1usize.into()).index(index.into()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| error.payload("Env"))?;
-                Env::from_bindings(bindings).map(Read::Env).map_err(|name| {
-                    let mut error =
-                        DecodeFailure::new(DecodeCause::DuplicateField(name.to_string()));
-                    if let Some((index, _)) = entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (bound, _))| bound.as_str() == name.as_ref())
-                        .nth(1)
-                    {
-                        error = error.index(0usize.into()).index(index.into());
-                    }
-                    error.payload("Env")
-                })
-            }
-            Row::List(items) => items
+    fn row(&self, row: &Row<RawData>) -> Result<Env, DecodeFailure> {
+        let Row::Env(entries) = row;
+        let bindings = entries
+            .iter()
+            .enumerate()
+            .map(|(index, (name, binding))| {
+                self.binding(binding)
+                    .map(|binding| (name.as_str().into(), binding))
+                    .map_err(|error| error.index(1usize.into()).index(index.into()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.payload("Env"))?;
+        Env::from_bindings(bindings).map_err(|name| {
+            let mut error = DecodeFailure::new(DecodeCause::DuplicateField(name.to_string()));
+            if let Some((index, _)) = entries
                 .iter()
                 .enumerate()
-                .map(|(index, value)| self.value(value).map_err(|error| error.index(index.into())))
-                .collect::<Result<Vec<_>, _>>()
-                .map(|items| Read::Built(ValClos::list(items)))
-                .map_err(|error| error.payload("List")),
-            Row::Map(entries) => {
-                let mut seen = HashSet::with_capacity(entries.len());
-                let mut values = Vec::with_capacity(entries.len());
-                for (index, (key, value)) in entries.iter().enumerate() {
-                    if !seen.insert(key) {
-                        return Err(DecodeFailure::new(DecodeCause::DuplicateField(key.clone()))
-                            .index(0usize.into())
-                            .index(index.into())
-                            .payload("Map"));
-                    }
-                    let value = self.value(value).map_err(|error| {
-                        error
-                            .index(1usize.into())
-                            .index(index.into())
-                            .payload("Map")
-                    })?;
-                    values.push((key.clone(), value));
-                }
-                Ok(Read::Built(ValClos::map(values)))
+                .filter(|(_, (bound, _))| bound.as_str() == name.as_ref())
+                .nth(1)
+            {
+                error = error.index(0usize.into()).index(index.into());
             }
-        }
+            error.payload("Env")
+        })
     }
 
     fn binding(&self, binding: &wire::Binding<RawData>) -> Result<Binding, DecodeFailure> {
@@ -287,11 +231,6 @@ impl Reader<'_> {
                     })
             }
             Value::Handle(title) => Ok(ValClos::withheld(title.as_str())),
-            Value::Failure(raw) => raw
-                .validate()
-                .map(ValClos::failure)
-                .map_err(|error| error.payload("Failure")),
-            Value::Built(row) => self.built(*row).map_err(|error| error.payload("Built")),
         }
     }
 

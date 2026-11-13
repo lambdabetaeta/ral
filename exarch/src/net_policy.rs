@@ -10,8 +10,8 @@
 
 use ral_core::egress::{Host, NetPolicy};
 use ral_core::own::UserFile;
-use ral_core::shell::runtime::{ValClos, View};
 use ral_core::source::{SourceFile, SourceOrigin};
+use ral_core::{ValClos, View};
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
@@ -105,7 +105,7 @@ fn decode(value: &ValClos, display: &str) -> Result<NetPolicy, String> {
         }
     }
     let hosts_field = map.get("hosts");
-    let raw_hosts = match hosts_field.as_deref() {
+    let raw_hosts = match hosts_field {
         Some(value) => match value.view() {
             View::List(items) => items,
             _ => {
@@ -118,7 +118,7 @@ fn decode(value: &ValClos, display: &str) -> Result<NetPolicy, String> {
         None => return Err(format!("network policy {display}: missing 'hosts'")),
     };
     let mut hosts = std::collections::HashSet::with_capacity(raw_hosts.len());
-    for v in raw_hosts {
+    for v in raw_hosts.iter() {
         let View::String(raw) = v.view() else {
             return Err(format!(
                 "network policy {display}: 'hosts' entries must be strings, got {}",
@@ -132,7 +132,7 @@ fn decode(value: &ValClos, display: &str) -> Result<NetPolicy, String> {
             ));
         }
     }
-    let search = match map.get("search").as_deref() {
+    let search = match map.get("search") {
         Some(value) => match value.view() {
             View::Bool(b) => b,
             _ => {

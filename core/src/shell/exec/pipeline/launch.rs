@@ -13,8 +13,9 @@ use crate::authority::sandbox::Ownership;
 use crate::fact::AuditIo;
 use crate::io::child::Connection;
 use crate::io::{Source, SourceReader};
+use crate::ir::{Env, ValClos};
 use crate::process::{Placement, Scope, TerminalInput};
-use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, ValClos};
+use crate::shell::runtime::{CommandOrigin, Error, Mooring, Settled, Shell};
 use crate::source::Span;
 use std::sync::Arc;
 

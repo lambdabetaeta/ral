@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f9ac94f8
-verified_at_date: 2026-11-12
+verified_at_commit: 9290eb03
+verified_at_date: 2026-11-13
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind, Machine, settle, resume, unwind, Frame::Acquire, Frame::Cleanup]
 ---
 
@@ -498,8 +498,8 @@ External raw exits remain in
 `Failure::Exited` for messages and hints until the failure-code projection
 clamps through `failure_byte` into `1..=255`. A negative Windows `NTSTATUS`
 must not become success. `exit` refuses outside `0..=255`; `fail` takes text,
-yielding code 1. `raise` re-raises a caught record's exact reason, and takes a
-hand-built record as a `Claim`, refusing status 0 and above 255. A `Reason`
+yielding code 1. `raise` takes any record as a `Claim`, refusing status 0 and
+above 255. A `Reason`
 stores no status, except a claim's own. Host `Static`/`Faulted` statuses stay `NonZeroU8`
 ([[design/endings|endings]],
 [[decisions/261105_the-error-record|the error record]]):

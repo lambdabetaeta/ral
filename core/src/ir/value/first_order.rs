@@ -1,9 +1,11 @@
 //! Value closures and the first-order vocabulary.
 
-use super::{ValClos, View};
+use super::{VClosRef, ValClos, View};
 use crate::data::datum::Datum;
 use crate::data::{FOValue, NotData, Opaque};
 use crate::fact::{NonData, OpaqueKind, ValueShape};
+use crate::ir::{Env, Name, Val};
+use crate::source::Spanned;
 use std::convert::Infallible;
 
 impl From<Opaque> for OpaqueKind {
@@ -24,10 +26,10 @@ impl From<NotData> for NonData {
     }
 }
 
-impl ValClos {
-    /// What is not data about this value, by [`ValClos::shape`].
+impl VClosRef<'_> {
+    /// What is not data about this value, by [`VClosRef::shape`].
     #[must_use]
-    pub fn opacity(&self) -> Option<Opaque> {
+    pub fn opacity(self) -> Option<Opaque> {
         match self.shape() {
             ValueShape::Block => Some(Opaque::Block),
             ValueShape::Function => Some(Opaque::Function),
@@ -39,7 +41,7 @@ impl ValClos {
 impl FOValue {
     /// `leaf` answers for each opaque value met, which stands in its place.
     pub(crate) fn walk<E>(
-        v: &ValClos,
+        v: VClosRef<'_>,
         leaf: &mut impl FnMut(Opaque) -> Result<Self, E>,
     ) -> Result<Self, E> {
         let (labels, terminal) = v.peel_variants();
@@ -59,13 +61,13 @@ impl FOValue {
             View::List(items) => Self::List {
                 items: items
                     .iter()
-                    .map(|value| Self::walk(&value, &mut *leaf))
+                    .map(|value| Self::walk(value, &mut *leaf))
                     .collect::<Result<_, E>>()?,
             },
             View::Map(entries) => Self::Map {
                 entries: entries
                     .iter()
-                    .map(|(name, value)| Ok((name.to_string(), Self::walk(&value, &mut *leaf)?)))
+                    .map(|(name, value)| Ok((name.to_string(), Self::walk(value, &mut *leaf)?)))
                     .collect::<Result<_, E>>()?,
             },
             View::Variant { .. } => unreachable!("the tag spine was peeled above"),
@@ -84,17 +86,23 @@ impl FOValue {
         Ok(encoded)
     }
 }
-impl TryFrom<&ValClos> for FOValue {
+impl TryFrom<VClosRef<'_>> for FOValue {
     type Error = NotData;
-    fn try_from(v: &ValClos) -> Result<Self, NotData> {
+    fn try_from(v: VClosRef<'_>) -> Result<Self, NotData> {
         Self::walk(v, &mut Err).map_err(|leaf| NotData {
             leaf,
             nested: v.opacity().is_none(),
         })
     }
 }
+impl TryFrom<&ValClos> for FOValue {
+    type Error = NotData;
+    fn try_from(v: &ValClos) -> Result<Self, NotData> {
+        Self::try_from(VClosRef::from(v))
+    }
+}
 impl FOValue {
-    pub(crate) fn scrubbed(v: &ValClos) -> Self {
+    pub(crate) fn scrubbed(v: VClosRef<'_>) -> Self {
         let Ok(fo) = Self::walk(v, &mut |kind| Ok::<_, Infallible>(kind.placeholder()));
         fo
     }
@@ -104,41 +112,51 @@ impl ValClos {
         Self::from(d.encode())
     }
 }
+/// Data is closed syntax: ⟨V, ∅⟩.
 impl From<FOValue> for ValClos {
     fn from(fo: FOValue) -> Self {
-        let mut labels = Vec::new();
-        let mut terminal = fo;
-        while let FOValue::Variant { label, payload } = terminal {
-            labels.push(label);
-            terminal = payload.map_or(FOValue::Unit, |payload| *payload);
-        }
-        let value = match terminal {
-            FOValue::Unit => Self::UNIT,
-            FOValue::Bool { value } => Self::bool(value),
-            FOValue::Int { value } => Self::int(value),
-            FOValue::Float { value } => Self::float(value),
-            FOValue::String { value } => Self::string(value),
-            FOValue::Bytes { value } => Self::bytes(value),
-            FOValue::List { items } => Self::list(items.into_iter().map(Self::from).collect()),
-            FOValue::Map { entries } => Self::map(
-                entries
-                    .into_iter()
-                    .map(|(name, value)| (name, Self::from(value)))
-                    .collect(),
-            ),
-            FOValue::Variant { .. } => unreachable!("the tag spine was peeled above"),
-            FOValue::Ext(never) => match never {},
-        };
-        labels
-            .into_iter()
-            .rev()
-            .fold(value, |payload, label| Self::variant(label, Some(payload)))
+        Self::from_parts(datum_syntax(fo), Env::EMPTY)
     }
+}
+fn datum_syntax(fo: FOValue) -> Val {
+    let mut labels = Vec::new();
+    let mut terminal = fo;
+    while let FOValue::Variant { label, payload } = terminal {
+        labels.push(label);
+        terminal = payload.map_or(FOValue::Unit, |payload| *payload);
+    }
+    let value = match terminal {
+        FOValue::Unit => Val::Unit,
+        FOValue::Bool { value } => Val::Bool(value),
+        FOValue::Int { value } => Val::Int(value),
+        FOValue::Float { value } => Val::Float(value),
+        FOValue::String { value } => Val::String(value.into()),
+        FOValue::Bytes { value } => Val::Bytes(value.into()),
+        FOValue::List { items } => Val::list(
+            items
+                .into_iter()
+                .map(|item| Spanned::synthetic(datum_syntax(item))),
+        ),
+        FOValue::Map { entries } => Val::map(
+            entries
+                .into_iter()
+                .map(|(name, value)| (Name::from(name), Spanned::synthetic(datum_syntax(value)))),
+        ),
+        FOValue::Variant { .. } => unreachable!("the tag spine was peeled above"),
+        FOValue::Ext(never) => match never {},
+    };
+    labels
+        .into_iter()
+        .rev()
+        .fold(value, |payload, label| Val::Variant {
+            label: label.into(),
+            payload: Box::new(payload),
+        })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::{Env, block_over};
+    use crate::ir::block_over;
     #[test]
     fn a_leaf_reports_whether_it_is_the_value_or_inside_it() {
         let block = block_over(&Env::EMPTY);
@@ -153,9 +171,12 @@ mod tests {
             "a".into(),
             ValClos::variant("x", Some(ValClos::int(1))),
         )]);
-        assert_eq!(ValClos::from(FOValue::scrubbed(&data)), data);
         assert_eq!(
-            FOValue::scrubbed(&block_over(&Env::EMPTY)),
+            ValClos::from(FOValue::scrubbed(VClosRef::from(&data))),
+            data
+        );
+        assert_eq!(
+            FOValue::scrubbed(VClosRef::from(&block_over(&Env::EMPTY))),
             Opaque::Block.placeholder()
         );
     }

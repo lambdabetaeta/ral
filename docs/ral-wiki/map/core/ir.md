@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -38,8 +38,10 @@ of the containing tree's phase. `Prim::map_operands` converts `Prim<P, D>`
 to `Prim<Q, D>` infallibly, preserving operand spans and the representation
 axis; inference's individual sub-rules retain their own operand order.
 
-`IrData` selects only the byte and scheme leaves: `RuntimeData` uses `Bytes`
-and `Closed`; marshal-private `RawData` uses `String` and `Arc<Scheme>`.
+`IrData` selects the byte and scheme leaves and a node's fields: `RuntimeData`
+uses `Bytes`, `Closed` and a persistent `imbl::OrdMap`, sorted and distinct by
+construction; marshal-private `RawData` uses `String`, `Arc<Scheme>` and the
+pair sequence as written, which `marshal/read/ir.rs` checks on admission.
 `Val<P, D>::Bytes` holds `D::Bytes`; `DefineSchemes<D::Scheme>` holds the
 representation's definition schemes. Serde bounds terminate at these
 associated leaves, retaining explicit `P: Serial` and `Phrase`'s separate
@@ -49,6 +51,11 @@ decodes the same grammar as raw IR. `marshal/read/ir.rs` admits it before
 `ValClos::closure`, checking base64 and closing every nested linked-module
 scheme while preserving metadata and JSON paths
 ([[map/core/transport|transport]]).
+
+The runtime value types, `ValClos`, `VClosRef`, `View`, `ListRef`, `MapRef`,
+`Env` and `Binding`, live in `core/src/ir/{value,env}.rs` and `ir/value/`
+([[map/core/shell-state|shell-state]],
+[[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 
 Values, computations and shared nodes:
 
@@ -60,20 +67,22 @@ Values, computations and shared nodes:
   Forming a value executes no computation. Collection and thunk syntax share
   their `Arc` nodes: `Val::Thunk(Arc<ThunkNode>)`,
   `Val::List(Arc<ListNode>)`, `Val::Record`, and `Val::Map` (each
-  `Arc<FieldsNode>`, entries sorted by key, stably, at elaboration) hold only a
-  **plain** literal — no spread, no computed key. `Val` itself stays
+  `Arc<FieldsNode>`, entries sorted by key; the elaborator refuses a key
+  written twice) hold only a **plain** literal — no spread, no computed key. `Val` itself stays
   unspanned; every position onto which the checker narrows while emitting a
   constraint carries `Spanned<Val>`.
-- `Node<S> { shape: S, occ: Occ }` is IR that closes: a shape plus what it
-  mentions, computed once, where the node is built. `Node::new(shape)` walks
-  `shape` through `Occ::of`, which sorts and dedups its `Mentions`, and hands
-  back the `Arc<Self>` every holder shares; `shape()` lends the shape back,
-  `occ()` (`pub(crate)`) the occ. `ThunkNode = Node<Arc<Comp>>`, `GroupNode =
-  Node<Box<[(Name, Arc<Comp>)]>>`, `ListNode = Node<Box<[Spanned<Val>]>>`,
-  `FieldsNode = Node<Box<[(Name, Spanned<Val>)]>>`. `PartialEq` compares
-  shapes; serde carries the shape alone (`Node::from`/`Into` the shape), so
-  decoding a node off the wire recomputes its occ rather than trusting one
-  that rode along — `Val`'s own tests (T4) check a node crosses as its shape.
+- `Node<S> { shape: S, occ: OnceLock<Occ> }` is IR that closes: a shape plus
+  what it mentions, computed on first use. `Node::new(shape)` hands back the
+  `Arc<Self>` every holder shares; `shape()` lends the shape back, `occ()`
+  (`pub(crate)`) walks it once through `Occ::of`, which sorts and dedups its
+  `Mentions`, so a node built at run time pays only if something restricts to
+  it. `ThunkNode = Node<Arc<Comp>>`, `GroupNode =
+  Node<Box<[(Name, Arc<Comp>)]>>`, `ListNode =
+  Node<imbl::Vector<Spanned<Val>>>`, `FieldsNode = Node<Fields>` with
+  `Fields` the `IrData` map. `PartialEq` compares shapes; serde carries the
+  shape alone (`Node::from`/`Into` the shape), so decoding a node off the wire
+  recomputes its occ rather than trusting one that rode along — `Val`'s own
+  tests (T4) check a node crosses as its shape.
 - `Occ(Arc<[Name]>)` is a node's mentioned names, sorted and distinct by
   construction. `Occ::of(shape)` is the shared builder for nodes and boxed
   residual lambdas. `len` and `contains` (binary search) support lookup
@@ -85,8 +94,8 @@ Values, computations and shared nodes:
   pointer.
 - `Val::Variant { label, payload: Box<Val> }` always carries a payload;
   elaboration supplies `Unit` for a bare tag. Runtime `ValClos::variant`
-  shares its payload's syntax and capture; `View::Variant` omits a resolved
-  unit payload, including a variable bound to unit.
+  shares its payload's syntax and capture; `View::Variant`'s payload is a
+  borrowed value, which reads as `()` for a bare tag.
 - `CompKind::Prim(Prim)` computes on value operands only. `Prim::List`
   holds `ValListElem` entries or spreads; `Prim::Map` holds
   `MapEntryV::{Entry(Spanned<Val>, Spanned<Val>), Spread(Spanned<Val>)}`;
@@ -232,8 +241,8 @@ slice of arguments.
 
 `Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
 node shapes implement: `fn mentions(&self, out: &mut Vec<&Name>)`, one
-exhaustive, wildcard-free arm per variant. `Node::new` uses `Occ::of` over the
-shape it is building to compute that node's own `Occ`; a nested node's
+exhaustive, wildcard-free arm per variant. `Node::occ` uses `Occ::of` over the
+node's shape to compute its own `Occ` on first use; a nested node's
 `mentions` contributes its already-computed occ rather than being walked
 again, so occ for a whole program is linear in program text. `Toplevel::
 referenced_names` (`pub(crate)`) is the same walk, run over a phrase's `Comp`

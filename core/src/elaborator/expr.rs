@@ -5,9 +5,10 @@ use super::{
 };
 
 use crate::compile::CompileError;
-use crate::ir::{FieldsNode, Key, Prim};
+use crate::ir::{Fields, FieldsNode, Key, Prim};
 use crate::syntax::ast::{IndexKey, Options, Stmt};
 use crate::syntax::parser::ParseError;
+use crate::typecheck::TypeError;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -30,7 +31,7 @@ impl Elaborator<'_> {
         match (self.loader)(at, &written, self.script) {
             Ok(module) => comp!(self, CompKind::Use(module)),
             Err(refusal) => {
-                self.error.get_or_insert(CompileError::Use { at, refusal });
+                self.refuse(CompileError::Use { at, refusal });
                 comp!(self, CompKind::Return(Val::Unit))
             }
         }
@@ -317,7 +318,7 @@ impl Elaborator<'_> {
                     })
                     .collect();
                 if let Some(items) = plain {
-                    let fields = self.sorted_fields(items, binds);
+                    let fields = self.fields(items, binds);
                     comp!(self, CompKind::Return(Val::record(fields)))
                 } else {
                     let Some((RecordEntry::Spread(base), fields)) = entries.split_first() else {
@@ -350,7 +351,7 @@ impl Elaborator<'_> {
                     .collect();
                 match plain {
                     Some(items) => {
-                        let fields = self.sorted_fields(items, binds);
+                        let fields = self.fields(items, binds);
                         comp!(self, CompKind::Return(Val::map(fields)))
                     }
                     None => comp!(
@@ -487,24 +488,31 @@ impl Elaborator<'_> {
     }
 
     fn options(&mut self, opts: &Options, binds: &mut Vec<(Pattern, Comp)>) -> Arc<FieldsNode> {
-        FieldsNode::new(
-            self.sorted_fields(opts.iter().map(|(key, value)| (key, value)), binds)
-                .into(),
-        )
+        FieldsNode::new(self.fields(opts.iter().map(|(key, value)| (key, value)), binds))
     }
 
-    /// A plain record or map literal's entries, elaborated in written order and
-    /// then sorted by key, stably.
-    fn sorted_fields<'a>(
+    /// A plain record or map literal's entries, elaborated in written order. A
+    /// key written twice is refused here, as T0022 at each later value, since
+    /// the node holds one value per key.
+    fn fields<'a>(
         &mut self,
         items: impl IntoIterator<Item = (&'a String, &'a Spanned<Ast>)>,
         binds: &mut Vec<(Pattern, Comp)>,
-    ) -> Vec<(Name, Spanned<Val>)> {
-        let mut fields: Vec<(Name, _)> = items
+    ) -> Fields {
+        let mut written: Vec<(Name, _)> = items
             .into_iter()
             .map(|(key, value)| (key.as_str().into(), self.spanned_val(value, binds)))
             .collect();
-        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
-        fields
+        written.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let mut repeats: Vec<_> = written
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0)
+            .map(|pair| TypeError::duplicate_field(&pair[1].0, pair[1].1.span))
+            .collect();
+        if !repeats.is_empty() {
+            repeats.sort_by_key(|error| error.pos.map(|span| span.start));
+            self.refuse(CompileError::Types(repeats));
+        }
+        written.into_iter().collect()
     }
 }

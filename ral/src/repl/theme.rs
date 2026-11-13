@@ -8,10 +8,9 @@
 //! Color is suppressed automatically when [`ral_core::io::terminal::ui_color`]
 //! returns false, so the theme can store an unconditional `Some(color)`.
 
-use ral_core::View;
 use ral_core::io::ansi::{YELLOW, named_color};
-use ral_core::shell::runtime::MapRef;
 use ral_core::text::code;
+use ral_core::{MapRef, View};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.
 #[derive(Clone, Debug)]
@@ -41,8 +40,8 @@ impl OutputTheme {
     /// `set` takes text, with a colour name or `none` for `value-color`.
     pub(crate) fn from_map(pairs: MapRef<'_>) -> Result<Self, String> {
         let mut theme = Self::default();
-        for (k, v) in pairs {
-            let Some(value) = super::config::decode_setting(&v, &format!("theme.{k}"))? else {
+        for (k, v) in pairs.iter() {
+            let Some(value) = super::config::decode_setting(v, &format!("theme.{k}"))? else {
                 continue;
             };
             match (k, value.view()) {

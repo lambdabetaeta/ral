@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f
-generated_at_date: 2026-11-11
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 ---
 
 # Records and maps
@@ -13,7 +13,7 @@ fixes the surface and its three read rules.
 ## One carrier, two types
 
 Both use `Value::Map`, an ordered collection of `String → Value` pairs
-(`core/src/shell/runtime/{value,map}.rs`). The static types never unify:
+(`core/src/ir/value/map.rs`). The static types never unify:
 
 - **Record** `[l₁: A₁, …, lₙ: Aₙ | ρ]`: known labels, heterogeneous fields,
   an open row for further fields ([[design/row-types|row types]]).

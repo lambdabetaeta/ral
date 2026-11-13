@@ -11,8 +11,9 @@ use crate::fact::{
     Reason, StateFailure, ValueShape,
 };
 use crate::fact::{ErrorFact, ErrorRecord};
+use crate::ir::{ValClos, View};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Break, Escape, Mooring, Settled, Shell, ValClos, View};
+use crate::shell::runtime::{Break, Escape, Mooring, Settled, Shell};
 use crate::site::{Silent, site};
 
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
@@ -42,7 +43,7 @@ fn exit_status(n: i64) -> Result<u8, Error> {
     })
 }
 
-fn reraise(args: &[ValClos]) -> Result<Break, Error> {
+fn raise(args: &[ValClos]) -> Result<Break, Error> {
     let value = args.first().ok_or_else(|| {
         invalid(
             "raise",
@@ -56,18 +57,13 @@ fn reraise(args: &[ValClos]) -> Result<Break, Error> {
         frame,
         reason,
         site,
-    } = raised_fact(value)?;
+    } = claimed_fact(value)?;
     Ok(Break::from(Error::new(reason)).claimed_by(|| Prov::Resolved(Box::new((frame, site)))))
 }
 
-/// A caught record keeps the reason it witnesses; a hand-built one is the
-/// program's own claim.
-fn raised_fact(value: &ValClos) -> Result<ErrorFact, Error> {
-    if let View::Map(map) = value.view()
-        && let Some(fact) = map.witness()
-    {
-        return Ok(fact.clone());
-    }
+/// A record is plain data: whatever its origin, raising it is the program's
+/// own claim.
+fn claimed_fact(value: &ValClos) -> Result<ErrorFact, Error> {
     let data = FOValue::try_from(value)
         .map_err(|error| invalid("raise", InvalidCause::NonData(error.into())))?;
     if matches!(datum::field::<i64>(&data, "status"), Ok(0)) {
@@ -98,7 +94,7 @@ pub(super) fn builtin_fail(args: &[ValClos]) -> Break {
 }
 
 pub(super) fn builtin_raise(args: &[ValClos]) -> Break {
-    reraise(args).unwrap_or_else(Break::from)
+    raise(args).unwrap_or_else(Break::from)
 }
 
 pub(super) fn builtin_exit(args: &[ValClos], _env: &mut Shell) -> Settled<ValClos> {
@@ -195,7 +191,6 @@ pub(super) fn builtin_ask(args: &[ValClos]) -> Result<ValClos, Error> {
 mod tests {
     use super::*;
     use crate::fact::{Claim, Failure, FailureCode as _, NotRunnable, Reason, Unrunnable};
-    use crate::shell::runtime::ExitHints;
     use crate::source::CallSite;
     use std::num::NonZeroU8;
 
@@ -232,15 +227,20 @@ mod tests {
     }
 
     fn with_status(record: &ValClos, status: i64) -> ValClos {
-        let mut map = record
-            .as_map("with_status")
-            .expect("a record is a map")
-            .to_map();
-        map.insert("status".into(), ValClos::int(status));
-        map.into()
+        let View::Map(map) = record.view() else {
+            panic!("a record is a map")
+        };
+        ValClos::map(map.iter().map(|(key, value)| {
+            let value = if key == "status" {
+                ValClos::int(status)
+            } else {
+                value.into_owned()
+            };
+            (key.to_string(), value)
+        }))
     }
 
-    fn reraised(record: ValClos) -> Error {
+    fn raise_record(record: ValClos) -> Error {
         match builtin_raise(&[record]) {
             Break::Error(e) => e,
             other @ Break::Escape(_) => panic!("expected an error, got {other:?}"),
@@ -295,9 +295,9 @@ mod tests {
             panic!()
         };
         assert_eq!(error.reason, Reason::raised("boom"));
-        let Break::Error(error) =
-            builtin_fail(&[ValClos::failure(caught(tool(Failure::Exited(3)), "tool"))])
-        else {
+        let Break::Error(error) = builtin_fail(&[ValClos::from_datum(
+            caught(tool(Failure::Exited(3)), "tool").record(),
+        )]) else {
             panic!()
         };
         assert!(
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn raise_of_a_record_is_a_faithful_reraise() {
+    fn raise_of_any_failure_record_keeps_its_frame_message_status_and_site() {
         use crate::fact::{
             BootFailure, CompileFailure, CompilePhase, Denial, HostFailure, LaunchFailure,
             ProtocolFailure, RalFailure, SingleOrNested, Withholding,
@@ -358,8 +358,9 @@ mod tests {
             Reason::Cancelled,
             Reason::TimedOut,
         ] {
-            let fact = caught(reason, "tool");
-            assert_eq!(reraised(ValClos::failure(fact.clone())).fact(&shell), fact);
+            let record = caught(reason, "tool").record();
+            let error = raise_record(ValClos::from_datum(record.clone()));
+            assert_eq!(error.fact(&shell), record.claim());
         }
     }
 
@@ -367,25 +368,25 @@ mod tests {
     fn raise_of_a_hand_built_record_is_its_claim() {
         let shell = crate::test_helper::core_shell();
         let record = hand_built("nope", 3, "claimed");
-        let error = reraised(ValClos::from_datum(record.clone()));
+        let error = raise_record(ValClos::from_datum(record.clone()));
         assert_eq!(error.reason, claim("nope", 3));
         assert_eq!(error.failure_code().get(), 3);
         assert_eq!(error.fact(&shell), record.claim());
     }
 
     #[test]
-    fn a_rebuilt_caught_record_is_only_a_claim() {
+    fn a_caught_record_is_raised_as_a_claim_of_its_message() {
         let shell = crate::test_helper::core_shell();
         let fact = caught(tool(Failure::Exited(3)), "wrapper");
-        let error = reraised(ValClos::from_datum(fact.record()));
+        let error = raise_record(ValClos::from_datum(fact.record()));
         assert_eq!(error.reason, claim(&fact.describe(), 3));
         assert_eq!(error.fact(&shell).frame(), "wrapper");
     }
 
     #[test]
-    fn a_modified_caught_record_loses_its_witness() {
+    fn a_modified_record_is_raised_with_its_new_status() {
         let fact = caught(tool(Failure::Exited(3)), "wrapper");
-        let error = reraised(with_status(&ValClos::failure(fact.clone()), 5));
+        let error = raise_record(with_status(&ValClos::from_datum(fact.record()), 5));
         assert_eq!(error.reason, claim(&fact.describe(), 5));
     }
 
@@ -408,56 +409,18 @@ mod tests {
     }
 
     #[test]
-    fn raise_preserves_negative_external_exit_reasons() {
+    fn raise_of_a_negative_external_exit_keeps_the_status_its_record_reports() {
         for raw in [-1, i32::MIN, -1_073_741_790] {
-            let error = reraised(ValClos::failure(caught(tool(Failure::Exited(raw)), "tool")));
-            assert_eq!(error.failure_code(), NonZeroU8::MIN);
-            assert_eq!(error.reason, tool(Failure::Exited(raw)));
+            let record = caught(tool(Failure::Exited(raw)), "tool").record();
+            let error = raise_record(ValClos::from_datum(record.clone()));
+            assert_eq!(error.failure_code(), record.status);
         }
     }
 
     #[test]
-    fn reraised_exited_record_uses_the_session_table_after_the_stored_hint() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.set_exit_hints(ExitHints::from_text("tool 3 check the input"));
-        let error = reraised(ValClos::failure(caught(
-            tool(Failure::Exited(3)),
-            "wrapper",
-        )));
-        assert_eq!(error.hints(), []);
-        let rendered = error.render(shell.sources(), None, shell.exit_hints());
-        assert!(rendered.contains("check the input"), "{rendered}");
-        let decorated = error
-            .with_hint("check this invocation")
-            .with_context("outer")
-            .discarded(12);
-        let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
-        let stored = rendered.find("check this invocation").expect(&rendered);
-        let advice = rendered.find("check the input").expect(&rendered);
-        assert!(stored < advice, "{rendered}");
-        let raised = reraised(ValClos::failure(decorated.fact(&shell)));
-        assert!(raised.hints().is_empty() && raised.context().is_none());
-        assert_eq!(raised.unwound(), crate::shell::runtime::Unwound::default());
-        assert!(
-            raised
-                .render(shell.sources(), None, shell.exit_hints())
-                .contains("check the input")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reraised_records_recompute_reason_hints_without_a_caret() {
-        let record = ValClos::failure(caught(tool(Failure::Signaled(9)), "wrapper"));
-        let rendered = reraised(record).compact(&ExitHints::default());
-        assert!(rendered.contains("SIGKILL"));
-        assert!(rendered.contains("a.ral:3:4"));
-        assert!(!rendered.contains("here"));
-    }
-    #[test]
     fn raise_decode_and_nondata_failures_do_not_become_raised_text() {
         assert!(matches!(refusal(&[]), InvalidCause::Arity(_)));
-        let block = crate::shell::runtime::block_over(&crate::shell::runtime::Env::new());
+        let block = crate::ir::block_over(&crate::ir::Env::new());
         assert!(matches!(
             refusal(&[ValClos::list(vec![block])]),
             InvalidCause::NonData(crate::fact::NonData { nested: true, .. })
@@ -476,7 +439,7 @@ mod tests {
         ));
     }
     #[test]
-    fn reraised_admission_record_does_not_recover_a_report_only_witness() {
+    fn raised_admission_record_carries_no_report_only_witness() {
         use crate::fact::{
             AdmissionCause, AdmissionFailure, AdmissionUses, Expected, Found, InvalidFailure,
             ValueShape,
@@ -498,16 +461,15 @@ mod tests {
                 }),
             }),
         )));
-        let error = Error::new(reason.clone()).with_witness(Some(Span::new(file, 5, 8)));
+        let error = Error::new(reason).with_witness(Some(Span::new(file, 5, 8)));
         assert!(
             error
                 .render(&db, Some(file), shell.exit_hints())
                 .contains(", use at \"admission.ral\":2:1")
         );
-        let record = error.fact(&shell);
-        let raised = reraised(ValClos::failure(record.clone()));
-        assert_eq!(raised.reason, reason);
-        assert_eq!(raised.fact(&shell), record);
+        let record = error.fact(&shell).record();
+        let raised = raise_record(ValClos::from_datum(record.clone()));
+        assert_eq!(raised.fact(&shell), record.claim());
         assert!(raised.witness().is_none());
         assert_eq!(raised.hints(), []);
         assert!(

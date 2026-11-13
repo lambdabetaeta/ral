@@ -135,8 +135,8 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Elaboration's one failure: the first refusal stands.
-    fn refuse(&mut self, error: ParseError) {
-        self.error.get_or_insert(CompileError::Parse(error));
+    fn refuse(&mut self, error: impl Into<CompileError>) {
+        self.error.get_or_insert_with(|| error.into());
     }
 
     /// The one door into scope, hence the one place `SCRIPT` is refused as

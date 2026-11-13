@@ -168,7 +168,7 @@ impl Build<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::ValClos;
+    use crate::ir::ValClos;
     use crate::source::{FileId, Span};
     use crate::ty::{Fixings, Kind, Label, closed_record, open_record, open_variant};
     use crate::typecheck::unify::WeakSource;

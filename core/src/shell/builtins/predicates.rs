@@ -2,7 +2,8 @@
 //! [`ValClos::compare`]; `lt`, `gt` and `is-empty` are the prelude's.
 //! The filesystem probes (`exists`, `is-file`, …) live in [`super::fs`].
 
-use crate::shell::runtime::{Settled, ValClos};
+use crate::ir::ValClos;
+use crate::shell::runtime::Settled;
 
 pub(super) fn builtin_keys(args: &[ValClos]) -> Settled<ValClos> {
     let m = args[0].as_map("keys")?;

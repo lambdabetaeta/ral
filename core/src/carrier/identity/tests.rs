@@ -350,10 +350,10 @@ mod durability_tests {
     use super::*;
 
     fn builtin_panic_now(
-        _args: &[crate::shell::runtime::ValClos],
+        _args: &[crate::ir::ValClos],
         _mooring: &crate::shell::runtime::Mooring,
         _shell: &mut Shell,
-    ) -> crate::shell::runtime::Settled<crate::shell::runtime::ValClos> {
+    ) -> crate::shell::runtime::Settled<crate::ir::ValClos> {
         panic!("transport test: deliberate mid-eval panic");
     }
 
@@ -668,7 +668,8 @@ mod probe_tests {
 
     #[test]
     fn identity_child_and_boot_read_the_same_parent() {
-        use crate::shell::runtime::{HandlerEntry, ValClos};
+        use crate::ir::ValClos;
+        use crate::shell::runtime::HandlerEntry;
 
         let transport = fresh();
         let mut shell = crate::test_helper::core_shell();

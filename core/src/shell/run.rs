@@ -14,11 +14,12 @@
 use crate::diagnostic::Rejection;
 use crate::fact::{FailureCode as _, IoOperation, IoSubject, Reason, StandardStream, StateFailure};
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
+use crate::ir::ValClos;
 use crate::process::{Deadline, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
     DeferredSink, Desk, DisplacedSite, End, Error, Mooring, Notice, Observation, Prov, Settled,
-    Shell, SurfaceSink, TrailScope, ValClos, panic_text,
+    Shell, SurfaceSink, TrailScope, panic_text,
 };
 use crate::source::FileId;
 use crate::typecheck::Unit;

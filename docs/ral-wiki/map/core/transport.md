@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3fcae877
+generated_at_commit: 9290eb03
 generated_at_date: 2026-11-13
-covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/marshal.rs, core/src/marshal/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
+covers_paths: [core/src/data.rs, core/src/data/, core/src/ir/value/first_order.rs, core/src/marshal.rs, core/src/marshal/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
 
 # Map: core / transport
@@ -40,15 +40,15 @@ so a default `FOValue` is data all the way down.
   whose `Reason` is `Datum` but not `Typed`
   ([[decisions/261105_the-error-record|the error record]]).
 - `data/print.rs` — `pretty_print` over a `Printable` view, implemented by
-  `FOValue` here and `ValClos` in the shell; it sits below `authority`
+  `FOValue` here and `VClosRef` in the shell; it sits below `authority`
   ([[invariants/core-below-shell|core-below-shell]]).
 - `data/string.rs` — `Str`, the shared immutable string of IR and runtime
   values. `data/byte_encoding.rs` — bytes are base64 in JSON, native in binary
   codecs.
 
 **One walk joins `ValClos` to `FOValue`
-(`shell/runtime/value/first_order.rs`).** `FOValue::walk` hands each block,
-function or handle (`ValClos::opacity`) to a leaf function:
+(`ir/value/first_order.rs`).** `FOValue::walk` hands each block, function or
+handle (`VClosRef::opacity`) to a leaf function:
 
 - `TryFrom<&ValClos> for FOValue` refuses it with `NotData`, naming the leaf
   and whether it was nested;
@@ -83,8 +83,9 @@ hooks and root-only terminal authority do not.
 ### Writing — `write.rs`
 
 **One borrowed walk emits rows dependencies-first.** Nodes are allocations:
-a nonempty environment (`Env::addr`; ∅ names no row), a built list, a built
-map. An explicit Open/Close stack visits each once; a `HashMap` keyed by
+a nonempty environment (`Env::addr`; ∅ names no row). A list or map built at
+run time is a closure like any other, its elements bound in its row. An
+explicit Open/Close stack visits each once; a `HashMap` keyed by
 address assigns its id at close. The borrowed image keeps every address alive
 ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
 
@@ -93,8 +94,6 @@ address assigns its id at close. The borrowed image keeps every address alive
 - `Value::Builtin(name)`, `Value::Handle(title)`.
 - `Value::Residual { builtin, env, supplied }` — η of `builtin` after
   `supplied = arity − remaining` arguments, over its env row; zero is real.
-- `Value::Failure(RawDatum<ErrorFact>)` — a caught failure's witness.
-- `Value::Built(row)` — a built list or map, shared as the parent shared it.
 
 **Writing is total but for the cwd.** `Val::Builtin`, `Val::Handle` and
 `CompKind::Builtin` (δ) are `serde(skip)`; they occur only at a value
@@ -113,16 +112,16 @@ wrapped once as `ProtocolFailure::Decode { kind: Parent, operation: "child" }`.
   dropping the raw tree run on a grown stack (`STACK`, 64 MiB).
 - *Rows.* Row `i` is built from rows `j < i`; then the root env and handler
   frames from any row. A bad reference is `UnresolvedRow` with a `RowDefect`:
-  `Forward`, `Absent` or `WrongKind`. `Env::from_bindings` and the map row
-  refuse duplicate names and keys.
+  `Forward` or `Absent`. `Env::from_bindings` refuses duplicate names.
 - *IR admission* (`admit_val`, `admit_comp`, `admit_module`) rebuilds each
   node through its constructor, recursing into linked modules:
   - byte leaves pass `Bytes::from_base64`; `Define` and binding schemes pass
     `Closed::new` (`OpenScheme`);
   - a `Rec` index lies in its group (`RecIndex`);
   - record and map literal fields, `within` options and `grant` capabilities
-    are strictly sorted, since `MapRef::get` binary-searches
-    (`UnorderedField`, `DuplicateField`); update fields are distinct;
+    are strictly ascending on the wire's pair sequence, since they become the
+    persistent map a node holds (`admit_sorted_fields`: `UnorderedField`,
+    `DuplicateField`); update fields are distinct;
   - a `Site`'s node ids lie in range (`Site::check`, `DanglingNode`);
   - a `Define`'s schemes name exactly its pattern's names, since exports are
     read off schemes (`SchemeNames`).
@@ -136,8 +135,7 @@ wrapped once as `ProtocolFailure::Decode { kind: Parent, operation: "child" }`.
   `Saturated`, `EnvironmentSize`, `BuiltinUnbound`, `BuiltinForeign` or
   `ArgumentUnbound`.
 - *Handles* arrive withheld (`ValClos::withheld`); observing one fails
-  `withheld-handle`. *Failures* validate their `RawDatum<ErrorFact>` and
-  rebuild with `ValClos::failure`, so `raise` keeps the typed reason.
+  `withheld-handle`.
 - *Handler frames* keep entries, catch-all and `FrameKind`. Each arm must be a
   block or function (`Shape`) and names are distinct, since
   `HandlerEntry::ral_per_name` trusts its thunk.

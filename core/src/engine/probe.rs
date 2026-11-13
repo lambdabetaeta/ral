@@ -7,8 +7,9 @@ use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::fact::FailureCode as _;
 use crate::handle::Handle;
+use crate::ir::{ValClos, View};
 use crate::protocol::probe::{BindingRow, CompletionNames, Grants, HandleRow, HandleStatus, Probe};
-use crate::shell::runtime::{Shell, ValClos, View};
+use crate::shell::runtime::Shell;
 
 mod fs;
 

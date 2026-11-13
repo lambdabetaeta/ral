@@ -8,7 +8,7 @@ checker before the run, by the spawn at it.**
 Total inside but for `()`, gated at the operating-system call. The asymmetry is
 not an oversight in either direction:
 
-- **Inside the shell**, `Value::render_argv` (`core/src/shell/runtime/value.rs`)
+- **Inside the shell**, `ValClos::render_argv` (`core/src/ir/value.rs`)
   gives every value a text form, so a base frame, a handler arm and the audit
   trail take every shape at run time. `echo [a: 1]` prints a map; `echo $f`
   prints a block. The one shape the checker refuses there is `()`, which is
@@ -23,7 +23,7 @@ not an oversight in either direction:
 (`core/src/ty/exec_arg.rs`) names those shapes (`Unit`, `List`, `Map`, `Block`,
 `Handle`, `Bytes`) by a single wildcard-free match on a `Head`, `of_head`. The
 spawn (`check_argv`, `core/src/shell/exec/command.rs`) reads it through
-`Value::heads`, the checker's argv rule (`gate_arg`, `typecheck/infer.rs`)
+`ValClos::heads`, the checker's argv rule (`gate_arg`, `typecheck/infer.rs`)
 through `of_ty`, and
 one `remedy` per shape means a user meeting either refusal meets one language. A
 new head has to be given a verdict before it compiles, for both sides at once. A second

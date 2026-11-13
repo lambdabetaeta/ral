@@ -34,9 +34,9 @@ operands and never inspects command success.
 [[decisions/261105_the-error-record|error-record decision]] fixes the two rules:
 
 - `fail m` raises the claim `raised [m, 1]` at the innermost visible
-  operation, including `fail` itself. `raise e` re-raises a caught record's
-  exact reason (the record witnesses it); a hand-built or changed record is
-  validated and raised as the program's own claim. The record's `message` is
+  operation, including `fail` itself. `raise e` validates any record, caught,
+  changed or hand-built, and raises it as the program's own claim, keeping
+  its frame, message, status and site. The record's `message` is
   `Reason::describe`, derived from the reason alone; there is no `describe`
   builtin.
 - `frame` names a failing frame, which may be `index`, not a command; it is
@@ -48,10 +48,10 @@ operands and never inspects command success.
   means a span in a session source; prelude frames defer to the user's call.
   Name and site come from that same frame. Every run supplies a base, so an
   otherwise unclaimed failure is sited at its start, `script:1:1`.
-- A re-raise of a caught record keeps its reason, so the advice is recomputed
-  at the next render; stored hints, context and unwind facts are report-only and are
-  dropped (`docs/SPEC.md` §13.1 composes hints and advice). A worker's live
-  error carries its completed provenance to `done`, `poll` and `await` alike.
+- A raised claim has no typed reason, so it has no intrinsic advice; stored
+  hints, context and unwind facts are report-only and are dropped
+  (`docs/SPEC.md` §13.1 composes hints and advice). A worker's live error
+  carries its completed provenance to `done`, `poll` and `await` alike.
 - Operational failures carry typed subjects and causes (`denied`, `io`,
   `invalid`, `evaluation`, `state`, `compile`, `launch`, `protocol`, `host`);
   `invariant` identifies a runtime defect. Only an explicitly authored failure
@@ -88,8 +88,8 @@ the failure arose.** An external's life is `prepare`, `start` and `ending`
   discards its own value and restores the body's outcome. **Any release halt
   pre-empts that outcome**, error or escape alike
   ([[decisions/260819_a-failing-cleanup-pre-empts|a-failing-cleanup-pre-empts]]).
-- An `err` record is witnessed just as `try`'s is: `raise $e` in release
-  re-raises the exact reason. No returned value can suppress an ending.
+- An `err` record is the same plain data `try` hands over: `raise $e` in
+  release raises it as a claim. No returned value can suppress an ending.
   Log-and-continue belongs inside release, e.g.
   `guard A K { |r end| try { release $r $end } { |e| warn $e[message] } }`.
 - Acquisition halting runs no release. Acquisition and release are shielded

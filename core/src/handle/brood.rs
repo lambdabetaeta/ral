@@ -209,8 +209,9 @@ mod tests {
     use super::*;
     use crate::handle::CompletionPermit;
     use crate::io::Streams;
+    use crate::ir::ValClos;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::{End, ValClos};
+    use crate::shell::runtime::End;
 
     fn fresh_handle() -> (HandleInner, CompletionPermit) {
         HandleInner::new(

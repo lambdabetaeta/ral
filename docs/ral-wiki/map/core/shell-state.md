@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3fcae877
+generated_at_commit: 9290eb03
 generated_at_date: 2026-11-13
-covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/builtin.rs, core/src/handle.rs, core/src/handle/]
+covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/ir/value.rs, core/src/ir/value/, core/src/ir/env.rs, core/src/builtin.rs, core/src/handle.rs, core/src/handle/]
 ---
 
 # Map: core / shell / runtime — runtime values & shell state
@@ -9,27 +9,29 @@ covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/buil
 **A runtime value is a value closure `⟨V,ρ⟩`; a `Shell` is its state partitioned
 by lifetime, and what a run fixes rides beside it as an immutable `Mooring`.**
 `core/src/shell/runtime.rs` re-exports the types; the [[map/core/evaluator|evaluator]]
-steps over them.
+steps over them. The value types themselves live in `core/src/ir/`.
 
 ## Values
 
-**`ValClos` (`value.rs`) is `⟨V,ρ⟩` with a non-variable root and every direct
+**`ValClos` (`ir/value.rs`) is `⟨V,ρ⟩` with a non-variable root and every direct
 name of `V` bound in ρ** ([[design/cbpv|cbpv]],
 [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 
-- *Representation.* Syntax over ρ, a built `List`, or a built `Map` (optionally
-  carrying a caught failure's `ErrorFact`). `Held` exposes exactly this to the
-  marshaller.
-- *Formation.* `ValClos::close` restricts ρ to the value's occurrences and
-  pulls each missing direct name from Σ with its scheme (`pull_direct`).
-  `ValClos::thunk` forms `⟨thunk M, ρ↾occ(M)⟩`. Reading a component shares ρ
+- *Representation.* One form: `ValClos(Val, Env)`. A list or map built at run
+  time is syntax over `%itemK` variables bound in ρ; `parts` hands the
+  marshaller the syntax and environment, nothing more. `VClosRef(&Val, &Env)`
+  is the borrowed form, and every observation is defined on it.
+- *Formation.* `ValClos::close` (`shell/runtime/close.rs`) restricts ρ to the
+  value's occurrences and pulls each missing direct name from Σ with its
+  scheme. `ValClos::thunk` forms `⟨thunk M, ρ↾occ(M)⟩`. `VClosRef::sub` reads a
+  component: a variable is its binding in one lookup, anything else shares ρ
   without restricting again
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
   `ValClos::closure` rebuilds a marshalled closure and refuses an unbound
   direct name.
-- *Reading.* `View` reads one layer. `View::Variant` omits a unit payload,
-  including a variable bound to unit.
-- *Classification.* **`ValClos::shape` is the one classification.** A builtin
+- *Reading.* `VClosRef::view` reads the head constructor only; a
+  `View::Variant`'s payload is a `VClosRef`, and a bare tag's is `()`.
+- *Classification.* **`VClosRef::shape` is the one classification.** A builtin
   is classified as its η-expansion: arity 0 is a `Block`, otherwise a
   `Function`. `type_name`, `found` and `heads` all derive from it.
 - *Builtins.* `ValClos::builtin` is `⟨Val::Builtin(entry), ∅⟩`. Forcing or
@@ -38,8 +40,8 @@ name of `V` bound in ρ** ([[design/cbpv|cbpv]],
   and the arguments still awaited. `block` is a thunk the checker may read,
   never a residual. Display is `<native NAME>` or `<native NAME, k of n
   arguments>`.
-- *Tags.* `ValClos::variant` binds a builtin, handle, residual or built
-  collection payload to a fresh name, so a tag spine holds only syntax.
+- *Tags.* `ValClos::variant` binds a builtin, handle or residual payload to a
+  fresh name, so a tag spine holds only syntax.
 - *Exec arguments.* `heads` gives the heads a value is admitted at; the shapes
   `execve(2)` cannot take are `RefusedArg` (`ty/exec_arg.rs`), each with one
   `remedy`. `render_argv` is total
@@ -47,17 +49,19 @@ name of `V` bound in ρ** ([[design/cbpv|cbpv]],
 - *Size.* `shallow_size` sums string and byte lengths, recurses lists, maps
   and tag labels, and charges 32 for a thunk, builtin or handle, never
   descending a capture.
-- *Drop is trampolined:* a dying value queues the capture or built container it
-  alone owns, bounding the host stack.
+- *Drop is trampolined:* a dying value queues each environment and list,
+  record or map node it alone owns, bounding the host stack.
 - Compile-time bounds: `ValClos ≤ 48`, `Env ≤ 16` and machine `Frame ≤ 128`
   bytes.
 
 Beside it:
 
-- `list.rs` / `map.rs` — persistent `Arc<imbl::Vector<ValClos>>` /
-  `Arc<imbl::OrdMap<String, ValClos>>`. `ListRef` / `MapRef` read syntax over ρ
-  or built data alike; `to_list` / `to_map` share built spines.
-- `env.rs` — `Env` is ρ alone. A scope entry is `Binding { value, scheme:
+- `ir/value/list.rs` / `map.rs` — list and map nodes are `imbl::Vector` /
+  `imbl::OrdMap` of syntax. `ListRef` / `MapRef` read them over ρ; `ListRef`
+  also holds the one definition of cons, snoc, concat and tail, and
+  `ValClos::map` builds a map
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+- `ir/env.rs` — `Env` is ρ alone, and `Env::place` the one placement rule. A scope entry is `Binding { value, scheme:
   Option<Closed> }`. Entries are `Empty`, a sorted `ThinArc` array of at most
   8, or a persistent hash map, so a shared write copies only the touched node.
   Session bindings always carry a scheme; block-local ones may not
@@ -71,14 +75,14 @@ Beside it:
   (catchable) or `Escape` (`Exit`, `Stopped`). A process `Cancellation`
   becomes a non-catchable `Stopped`
   ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
-- `error.rs` — rendering of runtime `Error` and `outcome_value`, its record
-  form; the type is `core/src/error.rs` ([[map/core/diagnostics|diagnostics]]).
+- `error.rs` — rendering of runtime `Error` and `outcome_value`, whose `err`
+  arm is the plain record `ValClos::from_datum(fact.record())`; the type is `core/src/error.rs` ([[map/core/diagnostics|diagnostics]]).
 - `audit.rs` — the `Audit` collector over `fact/observation.rs`.
-- `value/compare.rs` — `equals` and `compare`, exact across `Int` and `Float`.
-  `value/first_order.rs` converts to and from `FOValue`.
-- `coerce.rs` — argument decoders (`as_str`, `as_list`, `as_map`,
-  `expect_handle`, `expect_thunk`); shape refusals go through
-  `ValClos::expected`. `expect_thunk` accepts a builtin through its η.
+- `compare.rs` — `equals` and `compare` on `VClosRef`, exact across `Int` and
+  `Float`. `ir/value/first_order.rs` converts to and from `FOValue`.
+- `coerce.rs` — argument decoders on `VClosRef` (`as_str`, `as_list`,
+  `as_map`, `expect_handle`); `expect_thunk` on `ValClos`; shape refusals go
+  through `expected`. `expect_thunk` accepts a builtin through its η.
   `expect_handle` refuses a withheld handle as `withheld-handle`.
 - `walk.rs` — `Shell::admitted_walk` hands `path::tree::Walk` the live grant
   and cancel scope, skipping unadmitted entries.
@@ -97,7 +101,7 @@ Beside it:
 - `HandleInner` carries `WorkerId`, title, birth `Stamp` (monotonic and wall),
   `home` node and one lock over its state, sampled as `Sample::{Running,
   Stopping, Ready, Consumed}`. The sole `CompletionPermit` publishes the end.
-- **`pins_live_work` recurses lists, maps, tag spines and a partial builtin's
+- **`pins_live_work` walks lists, maps, tag spines and a partial builtin's
   supplied arguments, never a block's capture**
   ([[internals/binding-leases|binding-leases]]).
 - `handle/brood.rs` — `Cradle`, `Brood`, `BroodGuard`; `handle/surface.rs` —
@@ -288,6 +292,6 @@ field from reaching either by default.
     fixings snapshot; it owns a fresh durable root and roster, no hooks, no
     terminal lease, and seals every inherited name as lease baseline.
   - Handles cross as titles and arrive withheld; held syntax, sharing,
-    residual arguments and failure witnesses survive. A non-Unicode cwd
+    residual arguments survive. A non-Unicode cwd
     refuses writing; a builtin the receiver lacks refuses reading
     ([[map/core/transport|transport]], [[map/exarch/agent|agent]]).

@@ -1,12 +1,13 @@
-//! One borrowed DAG walk, with row identities assigned after their dependencies.
+//! One borrowed DAG walk over environments, with row identities assigned after
+//! their dependencies.
 
 use super::wire::{self, Frame, Row, RowId, Value, Wire};
-use crate::data::json::RawDatum;
 use crate::fact::JsonEncodeFailure;
-use crate::ir::{RuntimeData, Val};
+use crate::ir::{Env, RuntimeData, Val, ValClos};
 use crate::shell::grant::{RawSpawnGrant, SpawnGrant};
-use crate::shell::runtime::{Env, Held, Image, RawContext, ValClos};
+use crate::shell::runtime::{Image, RawContext};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 pub(super) fn wire(
     image: Image,
@@ -20,9 +21,7 @@ pub(super) fn wire(
         fixings,
     } = image;
     let mut writer = Writer::default();
-    if let Some(root) = Node::env(&env) {
-        writer.visit(root);
-    }
+    writer.visit(&env);
     for frame in &context.handlers {
         for value in frame
             .entries
@@ -30,9 +29,7 @@ pub(super) fn wire(
             .map(|entry| &entry.thunk)
             .chain(frame.catch_all.as_ref())
         {
-            if let Some(root) = refs(value) {
-                writer.visit(root);
-            }
+            writer.visit(value.parts().1);
         }
     }
     let raw_context = RawContext::from_value_with(&context, |frames| {
@@ -51,7 +48,7 @@ pub(super) fn wire(
     })
     .map_err(|error| error.field("context"))?;
     Ok(Wire {
-        env: Node::env(&env).map(|node| writer.id(node)),
+        env: writer.id(&env),
         rows: writer.rows,
         context: raw_context,
         sources,
@@ -61,159 +58,94 @@ pub(super) fn wire(
     })
 }
 
-#[derive(Clone, Copy)]
-enum Node<'a> {
-    Env(&'a Env),
-    List(&'a imbl::Vector<ValClos>),
-    Map(&'a imbl::OrdMap<String, ValClos>),
-}
-
-impl<'a> Node<'a> {
-    fn env(env: &'a Env) -> Option<Self> {
-        env.addr().map(|_| Self::Env(env))
-    }
-
-    fn addr(self) -> usize {
-        match self {
-            Self::Env(env) => env
-                .addr()
-                .expect("only nonempty environments are nodes")
-                .get(),
-            Self::List(items) => std::ptr::from_ref(items).addr(),
-            Self::Map(entries) => std::ptr::from_ref(entries).addr(),
-        }
-    }
-
-    fn children(self, mut visit: impl FnMut(&'a ValClos)) {
-        match self {
-            Self::Env(env) => {
-                for (_, binding) in env.iter() {
-                    visit(&binding.value);
-                }
-            }
-            Self::List(items) => {
-                for value in items {
-                    visit(value);
-                }
-            }
-            Self::Map(entries) => {
-                for (_, value) in entries {
-                    visit(value);
-                }
-            }
-        }
-    }
-}
-
-/// The sole row reference a value writes, without entering its syntax or ρ.
-fn refs(value: &ValClos) -> Option<Node<'_>> {
-    match value.held() {
-        Held::Syn(Val::Builtin(_) | Val::Handle(_), _) | Held::Failure(_) => None,
-        Held::Syn(_, env) => Node::env(env),
-        Held::List(items) => Some(Node::List(items)),
-        Held::Map(entries) => Some(Node::Map(entries)),
-    }
-}
-
 enum Visit<'a> {
-    Open(Node<'a>),
-    Close(Node<'a>),
+    Open(&'a Env),
+    Close(&'a Env, NonZeroUsize),
 }
 
 #[derive(Default)]
 struct Writer {
-    ids: HashMap<usize, RowId>,
+    ids: HashMap<NonZeroUsize, RowId>,
     rows: Vec<Row<RuntimeData>>,
 }
 
 impl Writer {
-    fn visit(&mut self, root: Node<'_>) {
+    fn visit(&mut self, root: &Env) {
         let mut stack = vec![Visit::Open(root)];
         while let Some(visit) = stack.pop() {
             match visit {
-                Visit::Open(node) => {
-                    if self.ids.contains_key(&node.addr()) {
+                Visit::Open(env) => {
+                    let Some(addr) = env.addr() else { continue };
+                    if self.ids.contains_key(&addr) {
                         continue;
                     }
-                    stack.push(Visit::Close(node));
-                    node.children(|value| {
-                        if let Some(child) = refs(value) {
-                            stack.push(Visit::Open(child));
-                        }
-                    });
+                    stack.push(Visit::Close(env, addr));
+                    stack.extend(
+                        env.iter()
+                            .map(|(_, binding)| Visit::Open(binding.value.parts().1)),
+                    );
                 }
-                // Captures and built containers form a DAG: all edges have closed.
-                Visit::Close(node) => {
-                    let row = self.row(node);
+                // Captures form a DAG: all edges have closed.
+                Visit::Close(env, addr) => {
+                    let row = self.row(env);
                     let id = RowId::try_from(self.rows.len())
                         .expect("a marshalled image has fewer than 2^32 rows");
                     self.rows.push(row);
-                    self.ids.insert(node.addr(), id);
+                    self.ids.insert(addr, id);
                 }
             }
         }
     }
 
-    fn id(&self, node: Node<'_>) -> RowId {
-        self.ids[&node.addr()]
+    /// The row of `env`; `None` for ∅.
+    fn id(&self, env: &Env) -> Option<RowId> {
+        env.addr().map(|addr| self.ids[&addr])
     }
 
-    fn row(&self, node: Node<'_>) -> Row<RuntimeData> {
-        match node {
-            Node::Env(env) => Row::Env(
-                env.iter()
-                    .map(|(name, binding)| {
-                        (
-                            name.to_string(),
-                            wire::Binding {
-                                value: self.value(&binding.value),
-                                scheme: binding.scheme.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
-            ),
-            Node::List(items) => Row::List(items.iter().map(|value| self.value(value)).collect()),
-            Node::Map(entries) => Row::Map(
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), self.value(value)))
-                    .collect(),
-            ),
-        }
+    fn row(&self, env: &Env) -> Row<RuntimeData> {
+        Row::Env(
+            env.iter()
+                .map(|(name, binding)| {
+                    (
+                        name.to_string(),
+                        wire::Binding {
+                            value: self.value(&binding.value),
+                            scheme: binding.scheme.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn value(&self, value: &ValClos) -> Value<RuntimeData> {
-        let reference = refs(value).map(|node| self.id(node));
-        match value.held() {
-            Held::Syn(Val::Builtin(entry), _) => Value::Builtin(entry.decl.name.to_string()),
-            Held::Syn(Val::Handle(handle), _) => Value::Handle(handle.title().into()),
-            Held::Syn(mut val, _) => {
+        let (val, env) = value.parts();
+        match val {
+            Val::Builtin(entry) => Value::Builtin(entry.decl.name.to_string()),
+            Val::Handle(handle) => Value::Handle(handle.title().into()),
+            _ => {
                 if matches!(val, Val::Thunk(_))
                     && let Some((entry, remaining)) = value.residual()
                 {
                     return Value::Residual {
                         builtin: entry.decl.name.to_string(),
-                        env: reference.expect("a residual captures its builtin"),
+                        env: self.id(env).expect("a residual captures its builtin"),
                         supplied: u32::try_from(entry.decl.fixed_arity() - remaining)
                             .expect("a builtin has fewer than 2^32 arguments"),
                     };
                 }
                 let mut tags = Vec::new();
-                while let Val::Variant { label, payload } = val {
+                let mut foot = val;
+                while let Val::Variant { label, payload } = foot {
                     tags.push(label.to_string());
-                    val = payload;
+                    foot = payload;
                 }
                 Value::Closure {
                     tags,
-                    val: val.clone(),
-                    env: reference,
+                    val: foot.clone(),
+                    env: self.id(env),
                 }
             }
-            Held::List(_) | Held::Map(_) => {
-                Value::Built(reference.expect("a built collection names its row"))
-            }
-            Held::Failure(fact) => Value::Failure(RawDatum::from_datum(fact.clone())),
         }
     }
 }

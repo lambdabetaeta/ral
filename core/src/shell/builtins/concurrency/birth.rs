@@ -8,10 +8,11 @@ use crate::handle::HandleInner;
 use crate::handle::brood::{BroodGuard, BroodOwner, Cradle, EnrolClosed};
 use crate::handle::surface::DeferredSurface;
 use crate::io::{Sink, Streams, new_buffer};
+use crate::ir::ValClos;
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
-    DoneEvent, End, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, ValClos, WatchEvent,
-    WorkerEntry, WorkerId,
+    DoneEvent, End, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, WatchEvent, WorkerEntry,
+    WorkerId,
 };
 use std::sync::Arc;
 use std::time::Duration;

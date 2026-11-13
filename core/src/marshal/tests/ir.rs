@@ -1,13 +1,12 @@
 use crate::data::Bytes;
 use crate::fact::{DataStep, DecodeCause, DecodeFailure, ProtocolData, ProtocolFailure, Reason};
 use crate::ir::{
-    ArithOp, BinaryOp, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, Key, MapEntryV,
-    Mentions, Module, Node, Pattern, Phrase, Prim, Redirects, StderrTarget, StdinSource, Toplevel,
-    Val, ValListElem, WriteMode,
+    ArithOp, BinaryOp, Binding, CaseArm, CommandName, CommandWord, Comp, CompKind, Env, Exec,
+    Fields, Key, MapEntryV, Mentions, Module, Node, Pattern, Phrase, Prim, Redirects, StderrTarget,
+    StdinSource, Toplevel, Val, ValClos, ValListElem, WriteMode,
 };
 use crate::marshal::{self, Marshalled};
 use crate::shell::grant::SpawnGrant;
-use crate::shell::runtime::{Binding, Env, ValClos};
 use crate::source::{FileId, SourceFile, SourceOrigin, Span, Spanned};
 use crate::ty::{Closed, Scheme, Site, Ty, TyVar, UnitId};
 use serde_json::{Value as Json, json};
@@ -394,7 +393,7 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         ),
         (
             CompKind::Within {
-                opts: Node::new(vec![("a".into(), b())].into_boxed_slice()),
+                opts: Node::new(Fields::unit("a".into(), b())),
                 body: Val::Unit,
             },
             vec![
@@ -407,14 +406,14 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         ),
         (
             CompKind::Within {
-                opts: Node::new(Box::new([])),
+                opts: Node::new(Fields::new()),
                 body: bytes(),
             },
             vec![payload("Within"), field("body")],
         ),
         (
             CompKind::Grant {
-                caps: Node::new(vec![("a".into(), b())].into_boxed_slice()),
+                caps: Node::new(Fields::unit("a".into(), b())),
                 body: Val::Unit,
             },
             vec![
@@ -427,7 +426,7 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         ),
         (
             CompKind::Grant {
-                caps: Node::new(Box::new([])),
+                caps: Node::new(Fields::new()),
                 body: bytes(),
             },
             vec![payload("Grant"), field("body")],

@@ -1,12 +1,12 @@
 use crate::builtin::BuiltinEntry;
 use crate::data::json::{JsonDocument, decode_structural};
-use crate::ir::{CompKind, Val};
-use crate::marshal::wire::{Row, Value, Wire};
+use crate::ir::{
+    Binding, CompKind, Env, VClosRef, Val, ValClos, View, block_over, deep_block_chain,
+};
+use crate::marshal::wire::{self, Row, Value, Wire};
 use crate::marshal::{Marshalled, read};
 use crate::shell::grant::SpawnGrant;
-use crate::shell::runtime::{
-    Binding, Env, Held, Mooring, ValClos, View, block_over, deep_block_chain,
-};
+use crate::shell::runtime::Mooring;
 use crate::source::Spanned;
 use crate::{Shell, test_helper};
 use std::sync::{Arc, Barrier, Weak};
@@ -41,6 +41,10 @@ fn capture(name: &str, env: &Env) -> ValClos {
     )
 }
 
+fn row_of<'a>(env: &'a Env, name: &str) -> &'a Env {
+    env.get(name).expect("bound").parts().1
+}
+
 fn captured(value: &ValClos) -> &Env {
     let View::Thunk { env, .. } = value.view() else {
         panic!("expected a captured block");
@@ -51,24 +55,13 @@ fn captured(value: &ValClos) -> &Env {
 fn wire(parent: &Marshalled) -> Wire {
     let document = JsonDocument::parse(&parent.0).expect("marshalled JSON");
     let wire: Wire = decode_structural(document.root()).expect("marshalled structure");
-    for (before, row) in wire.rows.iter().enumerate() {
-        let check = |value: &Value| {
-            let (id, environment) = match value {
-                Value::Closure { env: Some(id), .. } | Value::Residual { env: id, .. } => {
-                    (*id, true)
-                }
-                Value::Built(id) => (*id, false),
-                _ => return,
-            };
-            assert!((id as usize) < before, "a row names only earlier rows");
-            assert_eq!(matches!(wire.rows[id as usize], Row::Env(_)), environment);
-        };
-        match row {
-            Row::Env(entries) => entries
-                .iter()
-                .for_each(|(_, binding)| check(&binding.value)),
-            Row::List(items) => items.iter().for_each(check),
-            Row::Map(entries) => entries.iter().for_each(|(_, value)| check(value)),
+    for (before, Row::Env(entries)) in wire.rows.iter().enumerate() {
+        for (_, binding) in entries {
+            if let Value::Closure { env: Some(id), .. } | Value::Residual { env: id, .. } =
+                &binding.value
+            {
+                assert!((*id as usize) < before, "a row names only earlier rows");
+            }
         }
     }
     wire
@@ -123,8 +116,8 @@ fn marker() -> (ValClos, Weak<BuiltinEntry>) {
     (ValClos::builtin(entry), weak)
 }
 
-fn builtin_owner(value: &ValClos) -> Weak<BuiltinEntry> {
-    let View::Builtin(entry) = value.view() else {
+fn builtin_owner<'a>(value: impl Into<VClosRef<'a>>) -> Weak<BuiltinEntry> {
+    let View::Builtin(entry) = value.into().view() else {
         panic!("the chain's builtin foot survives");
     };
     Arc::downgrade(entry)
@@ -143,7 +136,6 @@ fn environments_are_interned_by_allocation_not_contents() {
     let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     assert_eq!(encoded.rows.len(), 3, "two captures and the session");
-    assert!(encoded.rows.iter().all(|row| matches!(row, Row::Env(_))));
     let (image, _) = read(&shell.session.runtime, &parent).unwrap();
     let a = captured(image.env.get("a").unwrap());
     let b = captured(image.env.get("b").unwrap());
@@ -153,15 +145,17 @@ fn environments_are_interned_by_allocation_not_contents() {
 }
 
 #[test]
-fn built_collections_are_interned_by_allocation_not_contents() {
+fn built_collections_share_a_row_by_allocation_not_contents() {
     let mut shell = test_helper::core_shell();
-    let list = ValClos::list(vec![ValClos::int(7)]);
+    // A handle is never inlined, so each collection holding one has a row.
+    let handle = ValClos::withheld("h");
+    let list = ValClos::list(vec![handle.clone()]);
     let map = ValClos::map(vec![("x".into(), list.clone())]);
     let other_map = ValClos::map(vec![("x".into(), list.clone())]);
     for (name, value) in [
         ("list", list.clone()),
         ("list_alias", list),
-        ("other_list", ValClos::list(vec![ValClos::int(7)])),
+        ("other_list", ValClos::list(vec![handle])),
         ("map", map.clone()),
         ("map_alias", map),
         ("other_map", other_map),
@@ -171,42 +165,59 @@ fn built_collections_are_interned_by_allocation_not_contents() {
     let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     assert_eq!(encoded.rows.len(), 5, "two lists, two maps and the session");
-    assert_eq!(
-        encoded
-            .rows
-            .iter()
-            .filter(|row| matches!(row, Row::List(_)))
-            .count(),
-        2
-    );
-    assert_eq!(
-        encoded
-            .rows
-            .iter()
-            .filter(|row| matches!(row, Row::Map(_)))
-            .count(),
-        2
-    );
 
     let (image, _) = read(&shell.session.runtime, &parent).unwrap();
-    let list = |name| match image.env.get(name).unwrap().held() {
-        Held::List(items) => items,
-        _ => panic!("built list stays built"),
-    };
-    let map = |name| match image.env.get(name).unwrap().held() {
-        Held::Map(entries) => entries,
-        _ => panic!("built map stays built"),
-    };
-    assert!(std::ptr::eq(list("list"), list("list_alias")));
-    assert!(!std::ptr::eq(list("list"), list("other_list")));
-    assert!(std::ptr::eq(map("map"), map("map_alias")));
-    assert!(!std::ptr::eq(map("map"), map("other_map")));
+    let row = |name| row_of(&image.env, name);
+    assert!(row("list").ptr_eq(row("list_alias")));
+    assert!(!row("list").ptr_eq(row("other_list")));
+    assert!(row("map").ptr_eq(row("map_alias")));
+    assert!(!row("map").ptr_eq(row("other_map")));
     for name in ["map", "map_alias", "other_map"] {
-        let Held::List(items) = map(name).get("x").unwrap().held() else {
-            panic!("map entry stays a built list");
+        let View::Map(entries) = image.env.get(name).unwrap().view() else {
+            panic!("{name} stays a map");
         };
-        assert!(std::ptr::eq(items, list("list")));
+        let element = entries.get("x").unwrap().into_owned();
+        assert!(element.parts().1.ptr_eq(row("list")));
     }
+}
+
+#[test]
+fn a_built_list_crosses_as_a_closure_over_its_row() {
+    let mut shell = test_helper::core_shell();
+    bind(
+        &mut shell,
+        "list",
+        ValClos::list(vec![ValClos::withheld("h"), ValClos::int(7)]),
+    );
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
+    let encoded = wire(&parent);
+    let [Row::Env(items), Row::Env(session)] = encoded.rows.as_slice() else {
+        panic!("the list's row and the session's");
+    };
+    assert!(matches!(
+        items.as_slice(),
+        [(name, wire::Binding { value: Value::Handle(_), .. })] if name == "%item0"
+    ));
+    let [(_, binding)] = session.as_slice() else {
+        panic!("the session binds the list alone");
+    };
+    let Value::Closure {
+        tags,
+        val: Val::List(node),
+        env: Some(0),
+    } = &binding.value
+    else {
+        panic!("the list is a closure over row 0");
+    };
+    assert_eq!(tags, &Vec::<String>::new());
+    assert_eq!(node.shape().len(), 2, "the 7 is inline syntax");
+
+    let (image, _) = read(&shell.session.runtime, &parent).unwrap();
+    let View::List(items) = image.env.get("list").unwrap().view() else {
+        panic!("the list stays a list");
+    };
+    assert!(matches!(items.get(0).unwrap().view(), View::Handle(_)));
+    assert_eq!(items.get(1).unwrap().as_int(), Some(7));
 }
 
 #[test]
@@ -226,42 +237,24 @@ fn forty_definitions_write_forty_rows_not_exponentially_many() {
 }
 
 #[test]
-fn one_built_map_captured_by_three_closures_is_written_once() {
+fn one_built_list_captured_by_three_closures_is_written_once() {
     let mut shell = test_helper::core_shell();
-    let map = ValClos::map(vec![("x".into(), ValClos::int(7))]);
-    let env = environment("map", map.clone());
-    bind(&mut shell, "map", map);
+    let list = ValClos::list(vec![ValClos::withheld("h")]);
+    let env = environment("list", list.clone());
+    bind(&mut shell, "list", list);
     for name in ["a", "b", "c"] {
-        bind(&mut shell, name, capture("map", &env));
+        bind(&mut shell, name, capture("list", &env));
     }
     let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
-    let encoded = wire(&parent);
     assert_eq!(
-        encoded.rows.len(),
+        wire(&parent).rows.len(),
         3,
-        "one map, one capture and the session"
-    );
-    assert_eq!(
-        encoded
-            .rows
-            .iter()
-            .filter(|row| matches!(row, Row::Map(_)))
-            .count(),
-        1
+        "one list, one capture and the session"
     );
     let (image, _) = read(&shell.session.runtime, &parent).unwrap();
-    let Held::Map(root) = image.env.get("map").unwrap().held() else {
-        panic!("map stays built");
-    };
+    let root = row_of(&image.env, "list");
     for name in ["a", "b", "c"] {
-        let Held::Map(capture) = captured(image.env.get(name).unwrap())
-            .get("map")
-            .unwrap()
-            .held()
-        else {
-            panic!("capture stays built");
-        };
-        assert!(std::ptr::eq(root, capture));
+        assert!(row_of(captured(image.env.get(name).unwrap()), "list").ptr_eq(root));
     }
 }
 
@@ -367,13 +360,13 @@ fn a_hundred_thousand_built_lists_round_trip_and_drop_on_small_stacks() {
             value = ValClos::list(vec![value]);
         }
         let back = round_trip(&value);
-        let mut cursor = &back;
+        let mut cursor = VClosRef::from(&back);
         for _ in 0..100_000 {
-            let Held::List(items) = cursor.held() else {
-                panic!("every list stays built");
+            let View::List(items) = cursor.view() else {
+                panic!("every list stays a list");
             };
             assert_eq!(items.len(), 1);
-            cursor = &items[0];
+            cursor = items.get(0).unwrap();
         }
         let decoded_owner = builtin_owner(cursor);
         release_concurrently(value);
@@ -412,9 +405,7 @@ fn ten_thousand_tags_round_trip_flat_and_env_broken_on_small_stacks() {
                 bind(&mut shell, "value", value.clone());
                 let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
                 let encoded = wire(&parent);
-                let Row::Env(root) = &encoded.rows[encoded.env.unwrap() as usize] else {
-                    panic!("root is an environment");
-                };
+                let Row::Env(root) = &encoded.rows[encoded.env.unwrap() as usize];
                 let Value::Closure { tags, val, .. } = &root[0].1.value else {
                     panic!("tag spine stays a closure");
                 };
@@ -425,11 +416,10 @@ fn ten_thousand_tags_round_trip_flat_and_env_broken_on_small_stacks() {
                 let back = image.env.get("value").unwrap().clone();
                 drop(image);
                 drop(shell);
-                let (labels, terminal) = back.peel_variants();
+                let (labels, terminal) = VClosRef::from(&back).peel_variants();
                 assert_eq!(labels.len(), 10_000);
                 assert!(labels.iter().all(|label| label.as_ref() == "deep"));
                 assert_eq!(terminal.shape(), shape);
-                drop(terminal);
                 drop(labels);
                 release_concurrently(value);
                 release_concurrently(back);
@@ -449,17 +439,18 @@ fn shared_captures_inside_built_containers_drop_on_small_stacks() {
             )])]);
         }
         let back = round_trip(&value);
-        let mut cursor = &back;
+        let mut cursor = VClosRef::from(&back);
         for _ in 0..30_000 {
-            let Held::List(items) = cursor.held() else {
-                panic!("outer container stays a built list");
+            let View::List(items) = cursor.view() else {
+                panic!("outer container stays a list");
             };
-            let Held::Map(entries) = items[0].held() else {
-                panic!("inner container stays a built map");
+            let View::Map(entries) = items.get(0).unwrap().view() else {
+                panic!("inner container stays a map");
             };
-            cursor = captured(entries.get("closure").unwrap())
-                .get("tail")
-                .unwrap();
+            let View::Thunk { env, .. } = entries.get("closure").unwrap().view() else {
+                panic!("the entry stays a capture");
+            };
+            cursor = env.get("tail").unwrap().into();
         }
         let decoded_owner = builtin_owner(cursor);
         release_concurrently(value);

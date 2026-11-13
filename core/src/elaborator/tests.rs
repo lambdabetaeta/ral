@@ -207,22 +207,19 @@ fn strip_val(val: &Val) -> Val {
             elems
                 .shape()
                 .iter()
-                .map(|v| Spanned::synthetic(strip_val(&v.item)))
-                .collect::<Vec<_>>(),
+                .map(|v| Spanned::synthetic(strip_val(&v.item))),
         ),
         Val::Record(entries) => Val::record(
             entries
                 .shape()
                 .iter()
-                .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                .collect::<Vec<_>>(),
+                .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item)))),
         ),
         Val::Map(entries) => Val::map(
             entries
                 .shape()
                 .iter()
-                .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item))))
-                .collect::<Vec<_>>(),
+                .map(|(k, v)| (k.clone(), Spanned::synthetic(strip_val(&v.item)))),
         ),
         other => other.clone(),
     }
@@ -861,13 +858,43 @@ fn empty_scope_options_are_empty_records() {
 }
 
 #[test]
+fn a_literal_writing_a_key_twice_is_refused_at_each_later_value() {
+    use crate::typecheck::TypeErrorKind;
+    for (src, key, later) in [
+        (
+            "return [x: 1, x: 'two', x: 3]",
+            "x",
+            ["'two'", "3"].as_slice(),
+        ),
+        ("return [:, a: 1, a: 2]", "a", ["2"].as_slice()),
+    ] {
+        let ast = parse(src).expect("parse");
+        let error = elaborate(&ast, [], None, &mut no_modules).expect_err(src);
+        let CompileError::Types(errors) = error else {
+            panic!("expected duplicate-field refusals: {error:?}");
+        };
+        let found: Vec<_> = errors
+            .iter()
+            .map(|error| {
+                assert!(
+                    matches!(&error.kind, TypeErrorKind::DuplicateField { label } if label == key),
+                    "{error:?}"
+                );
+                &src[error.pos.expect("a span").range()]
+            })
+            .collect();
+        assert_eq!(found, later, "{src}");
+    }
+}
+
+#[test]
 fn an_empty_handler_map_is_preserved_as_an_option() {
     let ast = parse("within [handlers: [:]] { return () }").expect("parse");
     let comp = elaborate_one(&ast, [], None);
     let CompKind::Within { opts, .. } = &comp.item else {
         panic!("expected Within, got {:?}", comp.item);
     };
-    let [(key, value)] = opts.shape().as_ref() else {
+    let [(key, value)] = opts.shape().iter().collect::<Vec<_>>()[..] else {
         panic!("expected one option, got {opts:?}");
     };
     assert_eq!(key.as_ref(), "handlers");

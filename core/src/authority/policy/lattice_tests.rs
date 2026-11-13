@@ -6,9 +6,9 @@
 use super::exec::{ExecRules, Subject};
 use super::*;
 use crate::authority::grant::freeze::FreezeCtx;
+use crate::ir::ValClos;
 use crate::path::{self, Excluded, FrozenPath, Trace};
 use crate::shell::grant::{decode_capability_map, decode_grant};
-use crate::shell::runtime::ValClos;
 use crate::test_helper::{self, Tree, layer, trace};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -17,12 +17,7 @@ use strum::VariantArray;
 
 /// The map shape `decode_capability_map` receives in production.
 fn map(entries: Vec<(&str, ValClos)>) -> ValClos {
-    ValClos::map(
-        entries
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    ValClos::map(entries.into_iter().map(|(k, v)| (k.to_string(), v)))
 }
 
 fn tagged(label: &str, payload: &str) -> ValClos {

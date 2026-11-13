@@ -16,10 +16,10 @@ use ral_core::fact::{
 };
 use ral_core::path::{EntryName, Judged, Kind, Located, Reading};
 use ral_core::shell::runtime::{
-    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Map, Mooring, Settled,
+    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Mooring, Settled,
 };
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::{RegisterError, Shell, ValClos, View};
+use ral_core::{MapRef, RegisterError, Shell, ValClos, View};
 
 use super::super::enquiry::{Enquiry, PluginNote};
 use super::manifest::{self, HookEvent, ManifestHandlers};
@@ -49,7 +49,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
 /// plugin configured by nothing but its own defaults.
 pub(crate) fn load_plugin(
     name_or_path: &str,
-    options: Map,
+    options: MapRef<'_>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
@@ -200,12 +200,17 @@ fn install_bindings(
 fn instantiate(
     plugin: &str,
     val: ValClos,
-    options: Map,
+    options: MapRef<'_>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<ValClos> {
     if !matches!(val.view(), View::Map(_)) {
-        return ral_core::shell::evaluator::apply(&val, vec![options.into()], mooring, shell);
+        let options = ValClos::map(
+            options
+                .iter()
+                .map(|(key, value)| (key.to_owned(), value.into_owned())),
+        );
+        return ral_core::shell::evaluator::apply(&val, vec![options], mooring, shell);
     }
     if options.is_empty() {
         Ok(val)
@@ -291,7 +296,9 @@ mod tests {
             },
             "_test-load: load a plugin under the dispatch's mooring.",
             BuiltinBody::Captured(std::sync::Arc::new(move |_, mooring, shell| {
-                load_plugin(&path, Map::new(), mooring, shell).map(|()| ValClos::UNIT)
+                let none = ValClos::map(Vec::new());
+                let none = none.as_map("test options").expect("a map");
+                load_plugin(&path, none, mooring, shell).map(|()| ValClos::UNIT)
             })),
         )
     }

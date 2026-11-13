@@ -9,9 +9,8 @@ use crate::fact::{
 };
 use crate::io;
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp};
-use crate::ir::{Key, Prim, Val};
-use crate::shell::runtime::{Break, Env, Error, MapRef, Settled, Signature, ValClos, View};
-use std::borrow::Cow;
+use crate::ir::{Env, Key, MapRef, Prim, VClosRef, Val, ValClos, View};
+use crate::shell::runtime::{Break, Error, Settled, Signature};
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
@@ -28,7 +27,7 @@ pub(crate) fn position(val: &ValClos, n: usize) -> Result<ValClos, Error> {
     let View::List(items) = val.view() else {
         return Err(unreadable(val, Access::Position(n.into())));
     };
-    items.get(n).map(Cow::into_owned).ok_or_else(|| {
+    items.get(n).map(VClosRef::into_owned).ok_or_else(|| {
         evaluation(EvalFailure::IndexBounds(IndexBounds {
             index: n.into(),
             length: items.len().into(),
@@ -48,7 +47,7 @@ pub(crate) fn lookup(val: &ValClos, key: &ValClos) -> Result<ValClos, Error> {
 }
 
 fn entry(map: MapRef<'_>, key: &str, kind: KeyOrField) -> Result<ValClos, Error> {
-    map.get(key).map(Cow::into_owned).ok_or_else(|| {
+    map.get(key).map(VClosRef::into_owned).ok_or_else(|| {
         evaluation(EvalFailure::MissingEntry(MissingEntry {
             kind,
             key: key.into(),
@@ -366,7 +365,7 @@ mod tests {
             ValClos::list(vec![]),
             ValClos::map(vec![]),
             ValClos::variant("private-tag", None),
-            crate::shell::runtime::block_over(&Env::new()),
+            crate::ir::block_over(&Env::new()),
         ] {
             assert_eq!(
                 eval_reason(render(&value).unwrap_err()),

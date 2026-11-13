@@ -1,7 +1,8 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
 use crate::fact::{AmbientSetting, Reason, StateFailure};
-use crate::shell::runtime::{Error, Mooring, Settled, Shell, ValClos};
+use crate::ir::ValClos;
+use crate::shell::runtime::{Error, Mooring, Settled, Shell};
 use crate::ty::Site;
 use std::sync::Arc;
 
@@ -25,8 +26,7 @@ pub(super) fn env(shell: &Shell) -> ValClos {
             .context
             .env_overrides()
             .visible()
-            .map(|(k, v)| (k, ValClos::string(v)))
-            .collect(),
+            .map(|(k, v)| (k, ValClos::string(v))),
     )
 }
 
@@ -72,6 +72,7 @@ pub(super) fn nproc() -> ValClos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::VClosRef;
 
     fn new_shell() -> Shell {
         crate::test_helper::core_shell()
@@ -94,8 +95,8 @@ mod tests {
         let value = env(&shell);
         let m = value.as_map("env").expect("env must be a Map");
         assert_eq!(
-            m.get("RAL_AMBIENT_TEST_KEY").as_deref(),
-            Some(&ValClos::string("v"))
+            m.get("RAL_AMBIENT_TEST_KEY").map(VClosRef::into_owned),
+            Some(ValClos::string("v"))
         );
     }
 

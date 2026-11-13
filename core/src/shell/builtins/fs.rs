@@ -10,12 +10,13 @@
 use crate::error::Error;
 use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{InvalidCause, IoOperation, IoSubject, PathFailure, PathFailureGlob};
+use crate::ir::ValClos;
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
 use crate::shell::exec::command::would_run;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Mooring, Settled, Shell, ValClos};
+use crate::shell::runtime::{Mooring, Settled, Shell};
 use crate::text::quote_native;
 use std::ffi::OsStr;
 use std::io;
@@ -416,7 +417,7 @@ mod tests {
         let mut ask = |mode: u32| {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
             let truth = |v: Settled<ValClos>| {
-                v.is_ok_and(|v| matches!(v.view(), crate::shell::runtime::View::Bool(true)))
+                v.is_ok_and(|v| matches!(v.view(), crate::ir::View::Bool(true)))
             };
             [
                 truth(builtin_exists(&arg, &mut shell)),

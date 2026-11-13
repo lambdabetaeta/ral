@@ -12,7 +12,8 @@ use super::command::Command;
 use crate::authority::policy::Admitted;
 use crate::error::Error;
 use crate::fact::{self, AuditIo, ExitCode, Observation, Observed};
-use crate::shell::runtime::{Break, CommandOrigin, Mooring, Settled, Shell, ValClos, epoch_us};
+use crate::ir::ValClos;
+use crate::shell::runtime::{Break, CommandOrigin, Mooring, Settled, Shell, epoch_us};
 use crate::source::{CallSite, Span};
 
 /// One external's `Command` observation, from launch to end. Silent when

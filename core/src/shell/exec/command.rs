@@ -17,13 +17,11 @@ use crate::authority::sandbox::{Confinement, Image, Ownership, ProgramLaunch};
 use crate::error::Error;
 use crate::fact::{Failure, NotRunnable, PrepareStep, PrepareSubject, Reason, Unrunnable};
 use crate::io::child::{Connection, Drains};
-use crate::ir::{CommandName, Redirects};
+use crate::ir::{CommandName, Redirects, ValClos, View};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::launch::nul_free;
 use crate::process::{CancelCause, Group, Placement, Scope, Spawned, Unstarted, WaitOutcome};
-use crate::shell::runtime::{
-    Break, CommandOrigin, Context, Mooring, Settled, Shell, ValClos, View,
-};
+use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell};
 use crate::source::Span;
 use crate::ty::RefusedArg;
 use std::borrow::Cow;

@@ -18,10 +18,9 @@ use crate::fact::{
     JsonValueFailure, JsonValueNumberCause, Reason, ShapeFailure, StandardStream, Utf8Failure,
     Utf8Subject, ValueShape,
 };
+use crate::ir::{VClosRef, ValClos, View};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{
-    Mooring, Settled, Shell, ValClos, View, decode_utf8_strict, pointer_token,
-};
+use crate::shell::runtime::{Mooring, Settled, Shell, decode_utf8_strict, pointer_token};
 
 use crate::data::{FOValue, Finite};
 use crate::ty::Site;
@@ -327,7 +326,7 @@ pub(super) fn builtin_from_csv(
             .iter()
             .cloned()
             .zip(record.iter().map(ValClos::string));
-        rows.push(ValClos::map(fields.collect()));
+        rows.push(ValClos::map(fields));
     }
     site.admitted("from-csv", ValClos::list(rows), shell)
 }
@@ -398,14 +397,14 @@ pub(super) fn builtin_to_csv(args: &[ValClos], shell: &mut Shell) -> Settled<Val
     let rows = args[0].as_list("to-csv")?;
     let mut wtr = csv::Writer::from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let header = first.as_ref().as_map("to-csv")?;
+        let header = first.as_map("to-csv")?;
         if header.is_empty() {
             return Err(codec("to-csv", CodecFailure::CsvNoColumns).into());
         }
         wtr.write_record(header.keys())
             .map_err(|e| codec("to-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
         for (i, row) in rows.iter().enumerate() {
-            let map = row.as_ref().as_map("to-csv")?;
+            let map = row.as_map("to-csv")?;
             let stray = header
                 .keys()
                 .chain(map.keys())
@@ -428,7 +427,7 @@ pub(super) fn builtin_to_csv(args: &[ValClos], shell: &mut Shell) -> Settled<Val
             }
             let cells = map
                 .iter()
-                .map(|(key, value)| csv_cell(&value, i, key))
+                .map(|(key, value)| csv_cell(value, i, key))
                 .collect::<Settled<Vec<_>>>()?;
             wtr.write_record(cells)
                 .map_err(|e| codec("to-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
@@ -443,7 +442,7 @@ pub(super) fn builtin_to_csv(args: &[ValClos], shell: &mut Shell) -> Settled<Val
     write_encoded(&bytes, shell)
 }
 
-fn csv_cell(value: &ValClos, row: usize, key: &str) -> Settled<String> {
+fn csv_cell(value: VClosRef<'_>, row: usize, key: &str) -> Settled<String> {
     if let Some(text) = value.scalar_text() {
         return Ok(text);
     }
@@ -523,7 +522,7 @@ pub(super) fn builtin_echo(
 
 pub(super) fn builtin_to_lines(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let mut text = String::new();
-    for item in args[0].as_list("to-lines")? {
+    for item in args[0].as_list("to-lines")?.iter() {
         text.push_str(&item.to_string());
         text.push('\n');
     }
@@ -536,7 +535,7 @@ pub(super) fn builtin_to_lines(args: &[ValClos], shell: &mut Shell) -> Settled<V
 ///
 /// # Errors
 /// If `v` or anything nested within it is a block, function or handle.
-fn value_to_json(v: &ValClos) -> Result<serde_json::Value, CodecFailureNotJson> {
+fn value_to_json(v: VClosRef<'_>) -> Result<serde_json::Value, CodecFailureNotJson> {
     FOValue::try_from(v)
         .map(|fo| fo.to_json(|b| b.iter().map(|&byte| serde_json::json!(byte)).collect()))
         .map_err(|e| CodecFailureNotJson {
@@ -546,7 +545,8 @@ fn value_to_json(v: &ValClos) -> Result<serde_json::Value, CodecFailureNotJson> 
 }
 
 pub(super) fn builtin_to_json(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
-    let json = value_to_json(&args[0]).map_err(|e| codec("to-json", CodecFailure::NotJson(e)))?;
+    let json = value_to_json(VClosRef::from(&args[0]))
+        .map_err(|e| codec("to-json", CodecFailure::NotJson(e)))?;
     write_encoded(json.to_string().as_bytes(), shell)
 }
 
@@ -555,7 +555,7 @@ pub(super) fn builtin_to_json(args: &[ValClos], shell: &mut Shell) -> Settled<Va
 pub(super) fn builtin_to_jsonl(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let mut text = String::new();
     for (i, item) in args[0].as_list("to-jsonl")?.iter().enumerate() {
-        let json = value_to_json(item.as_ref()).map_err(|e| {
+        let json = value_to_json(item).map_err(|e| {
             Error::new(Reason::Invalid(Box::new(
                 InvalidFailure::new(
                     "to-jsonl".into(),
@@ -575,7 +575,8 @@ mod tests {
     use super::*;
     use crate::data::datum::Datum;
     use crate::fact::{DataStep, Found};
-    use crate::shell::runtime::{Break, Env, block_over};
+    use crate::ir::{Env, block_over};
+    use crate::shell::runtime::Break;
 
     fn input(bytes: &[u8]) -> Shell {
         let mut shell = crate::test_helper::core_shell();
@@ -699,7 +700,7 @@ mod tests {
             (block.clone(), false),
             (ValClos::list(vec![block.clone()]), true),
         ] {
-            let cause = value_to_json(&value).unwrap_err();
+            let cause = value_to_json(VClosRef::from(&value)).unwrap_err();
             assert_eq!(
                 cause,
                 CodecFailureNotJson {
@@ -770,7 +771,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            failure(csv_cell(&ValClos::UNIT, 4, "a").map(ValClos::string)).cause,
+            failure(csv_cell(VClosRef::from(&ValClos::UNIT), 4, "a").map(ValClos::string)).cause,
             InvalidCause::Codec(CodecFailure::CsvCell(CodecFailureCsvCell {
                 row: 4usize.into(),
                 key: "a".into(),

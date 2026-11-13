@@ -1,7 +1,7 @@
 //! Scope forms and options.
 
 use super::Generator;
-use crate::ir::{Comp, CompKind, FieldsNode, Pattern, Prim, Val, is_synthetic};
+use crate::ir::{Comp, CompKind, Fields, FieldsNode, Pattern, Prim, Val, is_synthetic};
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Ty};
 use crate::typecheck::builtins::{Arm, audit_record, handlers_ty};
@@ -110,7 +110,7 @@ impl Generator {
                     CompKind::Return(Val::Record(this.check_options(fields, table)))
                 }
                 CompKind::Return(Val::Unit) => {
-                    this.check_options(&FieldsNode::new(Box::new([])), table);
+                    this.check_options(&FieldsNode::new(Fields::new()), table);
                     CompKind::Return(Val::Unit)
                 }
                 CompKind::Return(Val::Thunk(block)) if factory => {
@@ -153,31 +153,21 @@ impl Generator {
         opts: &FieldsNode,
         table: &'static Table,
     ) -> Arc<FieldsNode<Inferring>> {
-        let mut written: Vec<_> = opts.shape().iter().enumerate().collect();
-        written.sort_by_key(|(_, (_, value))| value.span.map(|span| span.start));
-        let mut seen: Vec<&str> = Vec::new();
-        let mut nodes: Vec<_> = (0..written.len()).map(|_| None).collect();
-        for (i, (label, value)) in written {
-            let (duplicate, node) = self.with_span(value.span, |this| {
-                let duplicate = this.diagnose_if_duplicate(label, seen.iter().copied());
-                let node = this.check_option(label, &value.item, value.span, table);
-                (duplicate, node)
-            });
-            if !duplicate {
-                seen.push(label);
-            }
-            nodes[i] = Some((label.clone(), Spanned::with_span(value.span, node)));
-        }
+        let mut written: Vec<_> = opts.shape().iter().collect();
+        written.sort_by_key(|(_, value)| value.span.map(|span| span.start));
+        let nodes = written
+            .into_iter()
+            .map(|(label, value)| {
+                let node = self.with_span(value.span, |this| {
+                    this.check_option(label, &value.item, value.span, table)
+                });
+                (label.clone(), Spanned::with_span(value.span, node))
+            })
+            .collect();
         let missing: Vec<_> = table
             .keys
             .iter()
-            .filter(|key| {
-                key.required
-                    && !opts
-                        .shape()
-                        .iter()
-                        .any(|(label, _)| label.as_ref() == key.label)
-            })
+            .filter(|key| key.required && !opts.shape().contains_key(key.label))
             .collect();
         if !missing.is_empty() {
             self.solver.diagnose(TypeErrorKind::OptionsMissing {
@@ -186,12 +176,7 @@ impl Generator {
                 blanks: missing.iter().map(|key| key.blank).collect(),
             });
         }
-        FieldsNode::new(
-            nodes
-                .into_iter()
-                .map(|node| node.expect("option generated"))
-                .collect(),
-        )
+        FieldsNode::new(nodes)
     }
 
     fn check_option(
@@ -213,14 +198,8 @@ impl Generator {
             let nodes = entries
                 .shape()
                 .iter()
-                .enumerate()
-                .map(|(i, (label, value))| {
+                .map(|(label, value)| {
                     let node = self.with_span(value.span, |this| {
-                        if entries.shape()[..i].iter().any(|(seen, _)| seen == label) {
-                            this.solver.diagnose(TypeErrorKind::DuplicateField {
-                                label: label.to_string(),
-                            });
-                        }
                         this.install_arm(&value.item, label, value.span)
                     });
                     (label.clone(), Spanned::with_span(value.span, node))
@@ -352,7 +331,7 @@ impl Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Argv, CommandName, CommandWord, Pattern, Redirects};
+    use crate::ir::{Argv, CommandName, CommandWord, Name, Pattern, Redirects};
     use crate::source::FileId;
     use crate::ty::{CompTyNode, Grade, Scheme, UnitId};
     use crate::typecheck::env::TyEnv;
@@ -412,6 +391,15 @@ mod tests {
         }
     }
 
+    fn fields(entries: Vec<(&str, Spanned<Val>)>) -> Arc<FieldsNode> {
+        FieldsNode::new(
+            entries
+                .into_iter()
+                .map(|(key, value)| (Name::from(key), value))
+                .collect(),
+        )
+    }
+
     fn generator() -> Generator {
         Generator::new(Solver::new(), TyEnv::new(), Vec::new())
     }
@@ -460,7 +448,7 @@ mod tests {
                 };
                 let guard_body = arm(&["resource"], comp.clone());
                 let body = block(comp);
-                let opts = FieldsNode::new(Vec::new().into());
+                let opts = FieldsNode::new(Fields::new());
                 let (cty, item) = match form {
                     0 => generator.within(&opts, &body),
                     1 => generator.grant(&opts, &body),
@@ -581,18 +569,13 @@ mod tests {
             factory: false,
         };
         let mut generator = generator();
-        let opts = FieldsNode::new(
-            vec![
-                ("later".into(), Spanned::new(at(5), Val::Int(1))),
-                ("early".into(), Spanned::new(at(2), Val::Int(2))),
-            ]
-            .into(),
-        );
+        let opts = fields(vec![
+            ("later", Spanned::new(at(5), Val::Int(1))),
+            ("early", Spanned::new(at(2), Val::Int(2))),
+        ]);
         let nodes = generator.check_options(&opts, &TABLE);
-        assert_eq!(nodes.shape()[0].0.as_ref(), "later");
-        assert_eq!(nodes.shape()[0].1.span, Some(at(5)));
-        assert_eq!(nodes.shape()[1].0.as_ref(), "early");
-        assert_eq!(nodes.shape()[1].1.span, Some(at(2)));
+        assert_eq!(nodes.shape()["later"].span, Some(at(5)));
+        assert_eq!(nodes.shape()["early"].span, Some(at(2)));
         let errors = generator.solver.refused().1;
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors.iter().any(|error| matches!(
@@ -603,37 +586,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_options_are_detected_in_source_order_not_field_order() {
-        let mut generator = generator();
-        let opts = FieldsNode::new(
-            vec![
-                ("flag".into(), Spanned::new(at(5), Val::Bool(false))),
-                ("flag".into(), Spanned::new(at(2), Val::Bool(true))),
-            ]
-            .into(),
-        );
-        let nodes = generator.check_options(&opts, &OPTIONAL);
-        assert_eq!(nodes.shape()[0].1.span, Some(at(5)));
-        assert_eq!(nodes.shape()[1].1.span, Some(at(2)));
-        let errors = generator.solver.refused().1;
-        let [error] = &errors[..] else {
-            panic!("{errors:?}")
-        };
-        assert!(matches!(error.kind, TypeErrorKind::DuplicateField { .. }));
-        assert_eq!(error.pos, Some(at(5)));
-    }
-
-    #[test]
     fn grant_options_keep_unknown_refused_and_vocabulary_refusals_distinct() {
         let mut generator = generator();
-        let caps = FieldsNode::new(
-            vec![
-                ("missing".into(), Spanned::new(at(1), Val::Unit)),
-                ("detach".into(), Spanned::new(at(2), Val::Bool(true))),
-                ("net".into(), Spanned::new(at(3), Val::Int(1))),
-            ]
-            .into(),
-        );
+        let caps = fields(vec![
+            ("missing", Spanned::new(at(1), Val::Unit)),
+            ("detach", Spanned::new(at(2), Val::Bool(true))),
+            ("net", Spanned::new(at(3), Val::Int(1))),
+        ]);
         generator.grant(&caps, &block(command(4, "emit")));
         let errors = generator.solver.refused().1;
         assert_eq!(errors.len(), 3, "{errors:?}");
@@ -653,19 +612,16 @@ mod tests {
         generator
             .env
             .bind("targets".into(), Scheme::mono(unknown.clone()));
-        let caps = FieldsNode::new(
-            vec![(
-                "exec".into(),
-                Spanned::new(
-                    at(1),
-                    Val::record(vec![(
-                        "allow".into(),
-                        Spanned::new(at(2), Val::Variable("targets".into())),
-                    )]),
-                ),
-            )]
-            .into(),
-        );
+        let caps = fields(vec![(
+            "exec",
+            Spanned::new(
+                at(1),
+                Val::record(vec![(
+                    "allow".into(),
+                    Spanned::new(at(2), Val::Variable("targets".into())),
+                )]),
+            ),
+        )]);
         generator.grant(&caps, &block(command(3, "emit")));
         assert!(
             !generator
@@ -690,13 +646,10 @@ mod tests {
         generator
             .env
             .bind("caps".into(), Scheme::mono(unknown.clone()));
-        let caps = FieldsNode::new(
-            vec![(
-                "exec".into(),
-                Spanned::new(at(2), Val::Variable("caps".into())),
-            )]
-            .into(),
-        );
+        let caps = fields(vec![(
+            "exec",
+            Spanned::new(at(2), Val::Variable("caps".into())),
+        )]);
         generator.grant(&caps, &block(command(3, "emit")));
         assert!(
             generator
@@ -718,33 +671,28 @@ mod tests {
     fn within_installs_named_arms_only_for_its_body_and_keeps_arm_spans() {
         let mut generator = generator();
         generator.env.bind_handler("outer".into());
-        let entries = FieldsNode::new(
-            vec![(
-                "tool".into(),
-                Spanned::new(
-                    at(1),
-                    block(node(
-                        2,
-                        CompKind::Lam {
-                            param: "args".into(),
-                            body: Arc::new(command(3, "tool")),
-                        },
-                    )),
-                ),
-            )]
-            .into(),
-        );
-        let opts = FieldsNode::new(
-            vec![("handlers".into(), Spanned::new(at(0), Val::Map(entries)))].into(),
-        );
+        let entries = fields(vec![(
+            "tool",
+            Spanned::new(
+                at(1),
+                block(node(
+                    2,
+                    CompKind::Lam {
+                        param: "args".into(),
+                        body: Arc::new(command(3, "tool")),
+                    },
+                )),
+            ),
+        )]);
+        let opts = fields(vec![("handlers", Spanned::new(at(0), Val::Map(entries)))]);
         let (cty, item) = generator.within(&opts, &block(command(4, "tool")));
         let CompKind::Within { opts, .. } = item else {
             panic!("within preserved")
         };
-        let Val::Map(entries) = &opts.shape()[0].1.item else {
+        let Val::Map(entries) = &opts.shape()["handlers"].item else {
             panic!("handler map preserved")
         };
-        assert_eq!(entries.shape()[0].1.span, Some(at(1)));
+        assert_eq!(entries.shape()["tool"].span, Some(at(1)));
         assert!(generator.env.is_handled("outer"));
         assert!(!generator.env.is_handled("tool"));
         assert!(generator.env.lookup_binding("args").is_none());
@@ -789,25 +737,22 @@ mod tests {
     #[test]
     fn written_handler_maps_check_each_arm_without_joining_members() {
         let mut generator = generator();
-        let entries = FieldsNode::new(
-            vec![
-                (
-                    "first".into(),
-                    Spanned::new(
-                        at(1),
-                        arm(&["args"], node(2, CompKind::Return(Val::Int(1)))),
-                    ),
+        let entries = fields(vec![
+            (
+                "first",
+                Spanned::new(
+                    at(1),
+                    arm(&["args"], node(2, CompKind::Return(Val::Int(1)))),
                 ),
-                (
-                    "second".into(),
-                    Spanned::new(
-                        at(3),
-                        arm(&["args"], node(4, CompKind::Return(Val::Bool(true)))),
-                    ),
+            ),
+            (
+                "second",
+                Spanned::new(
+                    at(3),
+                    arm(&["args"], node(4, CompKind::Return(Val::Bool(true)))),
                 ),
-            ]
-            .into(),
-        );
+            ),
+        ]);
         generator.check_option(
             "handlers",
             &Val::Map(entries),
@@ -1006,8 +951,8 @@ mod tests {
                 generator.file_options(&node(1, CompKind::Return(value.clone())), &OPTIONAL, false);
             assert_eq!(comp.span, Some(at(1)));
             if let CompKind::Return(Val::Record(fields)) = &comp.item {
-                assert_eq!(fields.shape()[0].1.span, Some(at(2)));
-                assert!(matches!(fields.shape()[0].1.item, Val::Bool(true)));
+                assert_eq!(fields.shape()["flag"].span, Some(at(2)));
+                assert!(matches!(fields.shape()["flag"].item, Val::Bool(true)));
             }
             let solution = solved(generator.solver);
             let checked = Readback::new(&solution, UnitId::fresh(), 0).comp(&comp);

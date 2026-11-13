@@ -15,8 +15,7 @@ use ral_core::fact::{
     KeybindingFailureSequencePrefix, KeybindingFailureUnguardedBuiltinShadow, PluginFailure,
     PluginFailureUnknownHookEvent, RalFailure, Reason, ShapeFailure, ValueShape,
 };
-use ral_core::shell::runtime::MapRef;
-use ral_core::{ValClos, View, label, record};
+use ral_core::{MapRef, VClosRef, ValClos, View, label, record};
 use std::collections::HashMap;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -193,7 +192,7 @@ fn invalid_at(path: Vec<DataStep>, cause: InvalidCause) -> Error {
     })))
 }
 
-fn expected_at(path: Vec<DataStep>, value: &ValClos, expected: Expected) -> Error {
+fn expected_at(path: Vec<DataStep>, value: VClosRef<'_>, expected: Expected) -> Error {
     invalid_at(
         path,
         InvalidCause::Shape(ShapeFailure {
@@ -210,7 +209,7 @@ pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Err
         _ => {
             return Err(expected_at(
                 vec![DataStep::Field("name".into())],
-                &value,
+                value,
                 Expected::Shape(ValueShape::String),
             ));
         }
@@ -221,7 +220,7 @@ pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Err
             _ => {
                 return Err(expected_at(
                     vec![DataStep::Field("handlers".into())],
-                    &value,
+                    value,
                     Expected::Shape(ValueShape::Map),
                 ));
             }
@@ -234,7 +233,7 @@ pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Err
             _ => {
                 return Err(expected_at(
                     vec![DataStep::Field("hooks".into())],
-                    &value,
+                    value,
                     Expected::Shape(ValueShape::Map),
                 ));
             }
@@ -243,11 +242,11 @@ pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Err
     };
     let (keybindings, keybinding_handlers) = match map.get("keybindings") {
         Some(value) => match value.view() {
-            View::List(l) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
+            View::List(l) => parse_keybindings(l.iter())?,
             _ => {
                 return Err(expected_at(
                     vec![DataStep::Field("keybindings".into())],
-                    &value,
+                    value,
                     Expected::Shape(ValueShape::List),
                 ));
             }
@@ -294,10 +293,9 @@ fn parse_hooks(entries: MapRef<'_>) -> Result<Vec<(HookEvent, ValClos)>, Error> 
 
 type KeybindingHandlers = Vec<(String, ValClos)>;
 
-fn parse_keybindings<I>(entries: I) -> Result<(Vec<KeySpec>, KeybindingHandlers), Error>
-where
-    I: Iterator<Item = ValClos>,
-{
+fn parse_keybindings<'a>(
+    entries: impl Iterator<Item = VClosRef<'a>>,
+) -> Result<(Vec<KeySpec>, KeybindingHandlers), Error> {
     let mut out = Vec::new();
     let mut handlers = Vec::new();
     for (index, entry) in entries.enumerate() {
@@ -313,11 +311,7 @@ where
             path
         };
         let View::Map(map) = entry.view() else {
-            return Err(expected_at(
-                path(),
-                &entry,
-                Expected::Shape(ValueShape::Map),
-            ));
+            return Err(expected_at(path(), entry, Expected::Shape(ValueShape::Map)));
         };
         let key = match map.get("key") {
             Some(value) => match value.view() {
@@ -325,7 +319,7 @@ where
                 _ => {
                     return Err(expected_at(
                         field_path("key"),
-                        &value,
+                        value,
                         Expected::Shape(ValueShape::String),
                     ));
                 }
@@ -339,7 +333,7 @@ where
             Some(other) => {
                 return Err(expected_at(
                     field_path("handler"),
-                    &other,
+                    other,
                     Expected::AnyOf(vec![ValueShape::Block, ValueShape::Function]),
                 ));
             }
@@ -356,7 +350,7 @@ where
                 _ => {
                     return Err(expected_at(
                         field_path("guard"),
-                        &value,
+                        value,
                         Expected::Shape(ValueShape::String),
                     ));
                 }
@@ -382,7 +376,7 @@ fn parse_handlers(entries: MapRef<'_>) -> Vec<(String, ValClos)> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::shell::runtime::Env;
+    use ral_core::ir::Env;
     use std::sync::Arc;
 
     fn invalid_reason(error: &Error) -> &InvalidFailure {
@@ -570,6 +564,10 @@ mod tests {
         )
     }
 
+    fn parse_entry(entry: &ValClos) -> Result<(Vec<KeySpec>, KeybindingHandlers), Error> {
+        parse_keybindings(std::iter::once(VClosRef::from(entry)))
+    }
+
     fn keybinding_entry(key: &str, guard: Option<&str>) -> ValClos {
         let mut fields = vec![
             ("key".into(), ValClos::string(key)),
@@ -621,7 +619,7 @@ mod tests {
             ("key".into(), ValClos::string("ctrl-t")),
             ("handler".into(), ValClos::int(3)),
         ]);
-        let err = parse_keybindings(std::iter::once(entry)).unwrap_err();
+        let err = parse_entry(&entry).unwrap_err();
         assert_eq!(
             invalid_reason(&err).path,
             vec![
@@ -642,7 +640,7 @@ mod tests {
     /// An invalid guard regex is a load error naming the key.
     #[test]
     fn invalid_guard_regex_is_load_error() {
-        let err = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some("("))))
+        let err = parse_entry(&keybinding_entry("ctrl-t", Some("(")))
             .expect_err("malformed regex must be rejected");
         assert!(
             err.describe().contains("ctrl-t") && err.describe().contains("guard"),
@@ -662,7 +660,7 @@ mod tests {
             ("up", BuiltinKeyAction::HistoryNavigation),
             ("t", BuiltinKeyAction::TextInsertion),
         ] {
-            let err = parse_keybindings(std::iter::once(keybinding_entry(key, None))).unwrap_err();
+            let err = parse_entry(&keybinding_entry(key, None)).unwrap_err();
             assert_eq!(
                 keybinding_reason(&err),
                 &KeybindingFailure::UnguardedBuiltinShadow(
@@ -686,8 +684,7 @@ mod tests {
     #[test]
     fn guarded_builtin_chord_parses() {
         let (out, _) =
-            parse_keybindings(std::iter::once(keybinding_entry("enter", Some(r"^git "))))
-                .expect("guarded enter parses");
+            parse_entry(&keybinding_entry("enter", Some(r"^git "))).expect("guarded enter parses");
         assert_eq!(out.len(), 1);
     }
 
@@ -695,7 +692,7 @@ mod tests {
     #[test]
     fn reserved_chords_are_rejected_guard_or_not() {
         for (key, guard) in [("ctrl-c", Some(r"\S")), ("ctrl-d", None)] {
-            let err = parse_keybindings(std::iter::once(keybinding_entry(key, guard)))
+            let err = parse_entry(&keybinding_entry(key, guard))
                 .expect_err("reserved chord must be rejected");
             assert!(
                 err.describe().contains(key) && err.describe().contains("reserved"),
@@ -709,12 +706,10 @@ mod tests {
     /// free; anything else is refused, guard or not.
     #[test]
     fn key_sequences_begin_with_ctrl_x() {
-        let (out, _) =
-            parse_keybindings(std::iter::once(keybinding_entry("ctrl-x ctrl-e", None))).unwrap();
+        let (out, _) = parse_entry(&keybinding_entry("ctrl-x ctrl-e", None)).unwrap();
         assert_eq!(out.len(), 1);
         for key in ["escape escape", "alt-x y", "ctrl-alt-x y"] {
-            let err =
-                parse_keybindings(std::iter::once(keybinding_entry(key, Some("x")))).unwrap_err();
+            let err = parse_entry(&keybinding_entry(key, Some("x"))).unwrap_err();
             assert_eq!(
                 keybinding_reason(&err),
                 &KeybindingFailure::SequencePrefix(KeybindingFailureSequencePrefix {
@@ -734,19 +729,17 @@ mod tests {
     /// itself the key.
     #[test]
     fn shift_with_a_character_is_load_error() {
-        let err =
-            parse_keybindings(std::iter::once(keybinding_entry("shift-a", Some("x")))).unwrap_err();
+        let err = parse_entry(&keybinding_entry("shift-a", Some("x"))).unwrap_err();
         assert!(
             matches!(keybinding_reason(&err), KeybindingFailure::Notation(KeybindingFailureNotation { cause: ral_core::fact::KeyNotationFailure::ShiftedCharacter(fact), .. }) if fact.character == "a" && !fact.control && !fact.alt)
         );
         assert!(err.reason.advice().iter().any(|hint| hint.contains("'A'")));
-        parse_keybindings(std::iter::once(keybinding_entry("shift-f5", None))).unwrap();
+        parse_entry(&keybinding_entry("shift-f5", None)).unwrap();
     }
 
     /// Reserved means exactly ctrl-c / ctrl-d: another modifier frees the chord.
     #[test]
     fn ctrl_alt_c_is_not_reserved() {
-        parse_keybindings(std::iter::once(keybinding_entry("ctrl-alt-c", None)))
-            .expect("ctrl-alt-c binds unguarded");
+        parse_entry(&keybinding_entry("ctrl-alt-c", None)).expect("ctrl-alt-c binds unguarded");
     }
 }

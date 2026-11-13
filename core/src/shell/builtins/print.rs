@@ -2,7 +2,7 @@
 //! the one value printer, and the REPL's numbers for it.
 
 use crate::data::print::{PrintParams, Printable, Shape};
-use crate::shell::runtime::{ValClos, View};
+use crate::ir::{VClosRef, View};
 use std::borrow::Cow;
 
 pub const REPL_PRINT_PARAMS: PrintParams = PrintParams {
@@ -15,15 +15,18 @@ pub const REPL_PRINT_PARAMS: PrintParams = PrintParams {
 };
 
 /// A leaf that is not data prints as its `Display`, a handle as `<handle>`.
-impl Printable for ValClos {
-    type Child<'a> = Cow<'a, Self>;
+impl Printable for VClosRef<'_> {
+    type Child<'a>
+        = Cow<'a, Self>
+    where
+        Self: 'a;
 
     fn shape(&self) -> Shape<'_, Self> {
         let (labels, terminal) = self.peel_variants();
         if !labels.is_empty() {
             return Shape::Variant {
                 labels: labels.into_iter().map(AsRef::as_ref).collect(),
-                payload: (!matches!(terminal.view(), View::Unit)).then_some(terminal),
+                payload: (!terminal.is_unit()).then_some(Cow::Owned(terminal)),
             };
         }
         match self.view() {
@@ -31,11 +34,11 @@ impl Printable for ValClos {
             View::Bytes(b) => Shape::Bytes(b),
             View::List(items) => Shape::List {
                 len: items.len(),
-                items: Box::new(items.iter()),
+                items: Box::new(items.iter().map(Cow::Owned)),
             },
             View::Map(pairs) => Shape::Map {
                 len: pairs.len(),
-                entries: Box::new(pairs.iter()),
+                entries: Box::new(pairs.iter().map(|(key, value)| (key, Cow::Owned(value)))),
             },
             View::Variant { .. } => unreachable!("consecutive tags were peeled above"),
             View::Handle(_) => Shape::Atom("<handle>".into()),
@@ -48,18 +51,14 @@ impl Printable for ValClos {
 mod tests {
     use super::*;
     use crate::data::print::pretty_print;
+    use crate::ir::ValClos;
 
     fn record(fields: &[(&str, ValClos)]) -> ValClos {
-        ValClos::map(
-            fields
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), v.clone()))
-                .collect(),
-        )
+        ValClos::map(fields.iter().map(|(k, v)| ((*k).to_string(), v.clone())))
     }
 
     fn print(v: &ValClos) -> String {
-        pretty_print(v, 0, &REPL_PRINT_PARAMS)
+        pretty_print(&VClosRef::from(v), 0, &REPL_PRINT_PARAMS)
     }
 
     #[test]
@@ -106,7 +105,7 @@ mod tests {
             assert_eq!(print(&value), format!("{prefix}{full}"));
             assert_eq!(
                 pretty_print(
-                    &ValClos::list(vec![value]),
+                    &VClosRef::from(&ValClos::list(vec![value])),
                     0,
                     &PrintParams {
                         max_depth: 0,
@@ -124,7 +123,7 @@ mod tests {
         };
         assert_eq!(
             pretty_print(
-                &ValClos::list(vec![tagged(), tagged()]),
+                &VClosRef::from(&ValClos::list(vec![tagged(), tagged()])),
                 0,
                 &PrintParams {
                     max_width: 17,

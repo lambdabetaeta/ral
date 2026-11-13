@@ -26,19 +26,18 @@ use crate::fact::{
     DataStep, Expected, GrantFailure, GrantFailureRefusedKey, InvalidCause, Reason, ShapeFailure,
     UnexpectedPayload, ValueShape,
 };
+use crate::ir::{ListRef, MapRef, VClosRef, ValClos, View};
 
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
-use crate::shell::runtime::{ListRef, MapRef, ValClos, View};
 use crate::text::near_names;
 use crate::typecheck::table::{
     DIR_TARGET, EDITOR, EXEC_TARGET, Form as TableForm, GPU, Holds, NET, PLACE, SHELL, Table,
     Vocab, code, declared,
 };
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-fn shape(value: &ValClos, expected: Expected) -> Error {
+fn shape(value: VClosRef<'_>, expected: Expected) -> Error {
     invalid_error(InvalidCause::Shape(ShapeFailure {
         expected,
         found: value.found(),
@@ -73,46 +72,49 @@ fn nested(key: &str) -> &'static Table {
 /// A tagged value: its label and payload.
 struct Tag<'a> {
     label: &'a str,
-    payload: Option<Cow<'a, ValClos>>,
+    /// `()` for a bare tag.
+    payload: VClosRef<'a>,
 }
 
 impl<'a> Tag<'a> {
-    fn of(value: &'a ValClos) -> Option<Self> {
+    fn of(value: VClosRef<'a>) -> Option<Self> {
         match value.view() {
             View::Variant { label, payload } => Some(Self { label, payload }),
             _ => None,
         }
     }
 
+    fn is_bare(&self) -> bool {
+        self.payload.is_unit()
+    }
+
     /// The string payload; `vocab` supplies contextual surface advice.
-    fn text(&self, vocab: &Vocab) -> Result<&str, Error> {
-        match self.payload.as_deref() {
-            Some(value) => match value.view() {
-                View::String(s) => Ok(s.as_str()),
-                _ => Err(at(
-                    shape(value, Expected::Shape(ValueShape::String)),
-                    DataStep::Payload(self.label.into()),
-                )
-                .with_hint(vocab.payload)),
-            },
-            None => Err(
+    fn text(&self, vocab: &Vocab) -> Result<&'a str, Error> {
+        match self.payload.view() {
+            View::String(s) => Ok(s.as_str()),
+            View::Unit => Err(
                 invalid_error(InvalidCause::MissingPayload(self.label.into()))
                     .with_hint(vocab.payload),
             ),
+            _ => Err(at(
+                shape(self.payload, Expected::Shape(ValueShape::String)),
+                DataStep::Payload(self.label.into()),
+            )
+            .with_hint(vocab.payload)),
         }
     }
 
     fn nullary(&self, vocab: &Vocab) -> Result<(), Error> {
-        match self.payload.as_deref() {
-            None => Ok(()),
-            Some(value) => Err(
-                invalid_error(InvalidCause::UnexpectedPayload(UnexpectedPayload {
-                    tag: self.label.into(),
-                    found: value.found(),
-                }))
-                .with_hint(vocab.payload),
-            ),
+        if self.is_bare() {
+            return Ok(());
         }
+        Err(
+            invalid_error(InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                tag: self.label.into(),
+                found: self.payload.found(),
+            }))
+            .with_hint(vocab.payload),
+        )
     }
 }
 
@@ -125,7 +127,7 @@ fn unknown_tag(vocab: &Vocab, tag: &str) -> Error {
     grant_error(vocab.refuse(tag))
 }
 
-fn untagged(vocab: &Vocab, value: &ValClos) -> Error {
+fn untagged(vocab: &Vocab, value: VClosRef<'_>) -> Error {
     shape(
         value,
         Expected::Tags((vocab.row)().into_iter().map(|(tag, _)| tag).collect()),
@@ -133,14 +135,14 @@ fn untagged(vocab: &Vocab, value: &ValClos) -> Error {
     .with_hint(vocab.untagged)
 }
 
-fn list_of(value: &ValClos) -> Result<ListRef<'_>, Error> {
+fn list_of(value: VClosRef<'_>) -> Result<ListRef<'_>, Error> {
     match value.view() {
         View::List(items) => Ok(items),
         _ => Err(shape(value, Expected::Shape(ValueShape::List))),
     }
 }
 
-fn table_of<'a>(value: &'a ValClos, empty: &str) -> Result<MapRef<'a>, Error> {
+fn table_of<'a>(value: VClosRef<'a>, empty: &str) -> Result<MapRef<'a>, Error> {
     match value.view() {
         View::Map(map) => Ok(map),
         _ => Err(shape(value, Expected::Shape(ValueShape::Map))
@@ -167,7 +169,7 @@ fn selector_of(tag: &Tag) -> Result<Option<Selector>, Error> {
 }
 
 /// One entry of an fs list.
-fn decode_place(value: &ValClos) -> Result<Place, Error> {
+fn decode_place(value: VClosRef<'_>) -> Result<Place, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&PLACE, value))?;
     place_of(&tag)?.ok_or_else(|| unknown_tag(&PLACE, tag.label))
 }
@@ -180,7 +182,7 @@ fn freeze_places<W: Polar>(
     list.iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            decode_place(&item)
+            decode_place(item)
                 .and_then(|place| {
                     ctx.walked::<W>(&place)
                         .and_then(|placed| placed.map(Placed::grant).transpose())
@@ -196,24 +198,24 @@ fn freeze_places<W: Polar>(
 
 /// `fs: [read: [...], write: [...], deny: [...]]`, lists of places, where
 /// `deny` carves holes inside the `read`/`write` prefix regions.
-fn decode_fs(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
+fn decode_fs(value: VClosRef<'_>, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
     let at = |error| within(err_prefix)(error);
     let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
-    for (sub, paths) in table_of(value, "fs: [read: []]").map_err(at)? {
+    for (sub, paths) in table_of(value, "fs: [read: []]").map_err(at)?.iter() {
         let list = |paths| list_of(paths).map_err(|e| at_field(e, sub)).map_err(at);
         match sub {
             "read" => {
-                read = freeze_places::<Trace>(list(&paths)?, ctx)
+                read = freeze_places::<Trace>(list(paths)?, ctx)
                     .map_err(|e| at_field(e, "read"))
                     .map_err(at)?;
             }
             "write" => {
-                write = freeze_places::<Trace>(list(&paths)?, ctx)
+                write = freeze_places::<Trace>(list(paths)?, ctx)
                     .map_err(|e| at_field(e, "write"))
                     .map_err(at)?;
             }
             "deny" => {
-                deny = freeze_places::<Excluded>(list(&paths)?, ctx)
+                deny = freeze_places::<Excluded>(list(paths)?, ctx)
                     .map_err(|e| at_field(e, "deny"))
                     .map_err(at)?;
             }
@@ -228,7 +230,7 @@ fn decode_fs(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLay
 }
 
 /// A nullary tag of `V`: its label names a `V` and carries no payload.
-fn nullary_tag<V: FromStr>(value: &ValClos, vocab: &Vocab) -> Result<V, Error> {
+fn nullary_tag<V: FromStr>(value: VClosRef<'_>, vocab: &Vocab) -> Result<V, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(vocab, value))?;
     let parsed = tag
         .label
@@ -239,13 +241,17 @@ fn nullary_tag<V: FromStr>(value: &ValClos, vocab: &Vocab) -> Result<V, Error> {
 }
 
 /// `net` and `gpu` each take their one restriction; omit one to inherit.
-fn decode_veto<V: FromStr>(value: &ValClos, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
+fn decode_veto<V: FromStr>(
+    value: VClosRef<'_>,
+    vocab: &Vocab,
+    err_prefix: &str,
+) -> Result<V, Error> {
     nullary_tag(value, vocab).map_err(within(err_prefix))
 }
 
 /// `editor`/`shell`: a list of verbs, each a nullary tag of `V`.
 fn decode_verbs<V: FromStr + Ord>(
-    value: &ValClos,
+    value: VClosRef<'_>,
     vocab: &Vocab,
     err_prefix: &str,
 ) -> Result<BTreeSet<V>, Error> {
@@ -254,7 +260,7 @@ fn decode_verbs<V: FromStr + Ord>(
         .map_err(at)?
         .iter()
         .enumerate()
-        .map(|(index, item)| nullary_tag(&item, vocab).map_err(|e| at_index(e, index)))
+        .map(|(index, item)| nullary_tag(item, vocab).map_err(|e| at_index(e, index)))
         .collect::<Result<_, _>>()
         .map_err(at)
 }
@@ -302,10 +308,11 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Err
 
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
 fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
-    let payload = tag.payload.as_deref().ok_or_else(|| {
-        invalid_error(InvalidCause::MissingPayload("dir".into())).with_hint(DIR_TARGET.untagged)
-    })?;
-    let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
+    if tag.is_bare() {
+        return Err(invalid_error(InvalidCause::MissingPayload("dir".into()))
+            .with_hint(DIR_TARGET.untagged));
+    }
+    let inner = Tag::of(tag.payload).ok_or_else(|| untagged(&DIR_TARGET, tag.payload))?;
     let dirs = if let Some(selector) = selector_of(&inner)? {
         ctx.selector::<W>(selector)?
     } else if let Some(place) = place_of(&inner)? {
@@ -322,7 +329,7 @@ fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
 
 /// One entry of an `allow` or `deny` list, as the rules polarity `W` makes
 /// of it.
-fn decode_target<W: Keyed>(value: &ValClos, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
+fn decode_target<W: Keyed>(value: VClosRef<'_>, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&EXEC_TARGET, value))?;
     match tag.label {
         "name" => {
@@ -333,10 +340,10 @@ fn decode_target<W: Keyed>(value: &ValClos, ctx: &FreezeCtx) -> Result<Vec<Rule>
                 .map_err(|e| at(e, DataStep::Payload("name".into())))
         }
         "dir" => dir_rules::<W>(&tag, ctx).map_err(|e| {
-            if tag.payload.is_some() {
-                at(e, DataStep::Payload("dir".into()))
-            } else {
+            if tag.is_bare() {
                 e
+            } else {
+                at(e, DataStep::Payload("dir".into()))
             }
         }),
         _ => match place_of(&tag)? {
@@ -354,7 +361,7 @@ fn decode_targets<W: Keyed>(list: ListRef<'_>, ctx: &FreezeCtx) -> Result<Vec<Ru
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            decode_target::<W>(&item, ctx).map_err(|error| at(error, DataStep::Index(index.into())))
+            decode_target::<W>(item, ctx).map_err(|error| at(error, DataStep::Index(index.into())))
         })
         .collect::<Result<_, _>>()?;
     Ok(rules.into_iter().flatten().collect())
@@ -362,18 +369,16 @@ fn decode_targets<W: Keyed>(list: ListRef<'_>, ctx: &FreezeCtx) -> Result<Vec<Ru
 
 /// `exec: [allow: [...], deny: [...]]`.  Argument restrictions are gone: a
 /// target is admitted or denied whatever its arguments.
-fn decode_exec(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
+fn decode_exec(value: VClosRef<'_>, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
     let at = |error| within(err_prefix)(error);
     let mut rules = Vec::new();
-    for (key, targets) in table_of(value, "exec: [allow: []]").map_err(at)? {
+    for (key, targets) in table_of(value, "exec: [allow: []]").map_err(at)?.iter() {
         let decode = match key {
             "allow" => decode_targets::<Trace>,
             "deny" => decode_targets::<Excluded>,
-            other => return Err(at(unknown_exec_key(other, &targets))),
+            other => return Err(at(unknown_exec_key(other, targets))),
         };
-        let list = list_of(&targets)
-            .map_err(|e| at_field(e, key))
-            .map_err(at)?;
+        let list = list_of(targets).map_err(|e| at_field(e, key)).map_err(at)?;
         rules.extend(
             decode(list, ctx)
                 .map_err(|e| at_field(e, key))
@@ -385,7 +390,7 @@ fn decode_exec(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<Exe
 
 /// Whether `value` has the shape of the old surface's per-command policy:
 /// `'allow'`, `'deny'`, or a list of subcommands.
-fn is_old_policy(value: &ValClos) -> bool {
+fn is_old_policy(value: VClosRef<'_>) -> bool {
     match value.view() {
         View::String(_) => true,
         View::List(items) => items.iter().all(|i| matches!(i.view(), View::String(_))),
@@ -393,7 +398,7 @@ fn is_old_policy(value: &ValClos) -> bool {
     }
 }
 
-fn unknown_exec_key(key: &str, value: &ValClos) -> Error {
+fn unknown_exec_key(key: &str, value: VClosRef<'_>) -> Error {
     let err = invalid_error(InvalidCause::UnknownField(nested("exec").unknown_key(key)));
     if !is_old_policy(value) || !near_names(key, ["allow", "deny"], 1).is_empty() {
         return err;
@@ -426,6 +431,7 @@ pub(crate) fn decode_capability_map(
     err_prefix: &str,
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, Error> {
+    let value = VClosRef::from(value);
     let entries = match value.view() {
         View::Map(entries) => Some(entries),
         View::Unit => None,
@@ -439,16 +445,16 @@ pub(crate) fn decode_capability_map(
     };
     let (mut exec, mut fs, mut net, mut gpu, mut editor, mut shell) =
         (None, None, None, None, None, None);
-    for (k, v) in entries.into_iter().flatten() {
+    for (k, v) in entries.into_iter().flat_map(MapRef::iter) {
         let context = format!("{err_prefix} {k}");
         let decoded = (|| -> Result<(), Error> {
             match k {
-                "exec" => exec = Some(decode_exec(&v, &context, ctx)?),
-                "fs" => fs = Some(decode_fs(&v, &context, ctx)?),
-                "net" => net = Some(decode_veto::<Net>(&v, &NET, &context)?),
-                "gpu" => gpu = Some(decode_veto::<Gpu>(&v, &GPU, &context)?),
-                "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &context)?),
-                "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &context)?),
+                "exec" => exec = Some(decode_exec(v, &context, ctx)?),
+                "fs" => fs = Some(decode_fs(v, &context, ctx)?),
+                "net" => net = Some(decode_veto::<Net>(v, &NET, &context)?),
+                "gpu" => gpu = Some(decode_veto::<Gpu>(v, &GPU, &context)?),
+                "editor" => editor = Some(decode_verbs::<EditorVerb>(v, &EDITOR, &context)?),
+                "shell" => shell = Some(decode_verbs::<ShellVerb>(v, &SHELL, &context)?),
                 other => {
                     let table = declared(TableForm::Grant);
                     return Err(match table.holds(other) {
@@ -535,12 +541,7 @@ mod tests {
     }
 
     fn rec(entries: &[(&str, ValClos)]) -> ValClos {
-        ValClos::map(
-            entries
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-        )
+        ValClos::map(entries.iter().map(|(k, v)| (k.to_string(), v.clone())))
     }
 
     fn list(items: Vec<ValClos>) -> ValClos {
@@ -916,7 +917,7 @@ mod tests {
                 DataStep::Index(0usize.into()),
                 DataStep::Payload("dir".into()),
             ];
-            if let Some(tag) = Tag::of(&payload) {
+            if let Some(tag) = Tag::of(VClosRef::from(&payload)) {
                 assert_invalid(&e, path, InvalidCause::Grant(DIR_TARGET.refuse(tag.label)));
                 assert!(e.describe().contains("place or a selector"), "{e}");
             } else {
@@ -1051,7 +1052,7 @@ mod tests {
             bare("homebrew"),
         ] {
             let e = fs_refusal(vec![item.clone()]);
-            let tag = Tag::of(&item).unwrap();
+            let tag = Tag::of(VClosRef::from(&item)).unwrap();
             assert_invalid(
                 &e,
                 vec![

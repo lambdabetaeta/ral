@@ -431,9 +431,9 @@ fn capture_program_table_refused_rows_keep_join_and_argument_hints() {
 
 #[test]
 fn capture_program_table_accepted_rows_write_and_return_as_documented() {
+    use ral_core::ValClos;
     use ral_core::protocol::Run;
     use ral_core::shell::run::RunReport;
-    use ral_core::shell::runtime::ValClos;
     use ral_core::source::SourceOrigin;
 
     let units = || ValClos::list(vec![ValClos::UNIT, ValClos::UNIT]);

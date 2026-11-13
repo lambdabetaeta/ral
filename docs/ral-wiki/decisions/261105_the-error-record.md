@@ -1,6 +1,7 @@
 ---
 status: active
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 ---
 
 # The error record
@@ -200,6 +201,12 @@ Visibility has one definition: the span lies in a session source.
 > caught record re-raises its exact reason through the map's witness; a
 > hand-built record is the program's `Claim`. The one-sum, one-provenance
 > core above is unchanged.
+
+> **Amended (261113).** By
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]],
+> a caught failure is plain record data with no witness, and `raise` of any
+> record is the program's `Claim`, keeping frame, message, status and site,
+> without restoring the typed cause or the hints it determined.
 
 ## A refused block is one fact
 

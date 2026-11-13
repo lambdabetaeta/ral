@@ -18,6 +18,10 @@ anchors: [guard_release, Frame::Cleanup]
 > body's four-arm `ExitCase`, with a witnessed error record under `err`, but
 > cannot suppress that ending. A halting acquisition runs no release.
 > The examples and implementation names below record the original decision.
+>
+> Amended 2026-11-13 by [[261112_runtime-values-are-value-closures|runtime values are value closures]]:
+> the release's `err` record is plain data with no witness; a caught failure
+> carries no typed cause.
 
 # A failing cleanup pre-empts
 

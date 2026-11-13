@@ -1,18 +1,19 @@
 ---
 status: active
-generated_at_commit: d50aa681
+generated_at_commit: 9290eb03
 generated_at_date: 2026-11-13
-verified_at_commit: d50aa681
+verified_at_commit: 9290eb03
 verified_at_date: 2026-11-13
-anchors: [Val, CompKind::Builtin, Explicit, ValClos, ValClos::close, ValClos::thunk, ValClos::view, ValClos::peel_variants, ValClos::residual, ValClos::block, BuiltinEntry::eta, Env::EMPTY, Stack::settle, CompClosure, Handle::Withheld, Marshalled, BuiltinEntry::residual]
+anchors: [Val, CompKind::Builtin, Explicit, ValClos, VClosRef, VClosRef::sub, VClosRef::view, VClosRef::into_owned, VClosRef::peel_variants, VClosRef::residual, VClosRef::block, ValClos::close, ValClos::thunk, ValClos::list, ValClos::map, ValClos::variant, ListRef::cons, ListRef::snoc, ListRef::concat, ListRef::suffix, Env::place, Env::EMPTY, Node, IrData, admit_sorted_fields, BuiltinEntry::eta, BuiltinEntry::residual, Stack::settle, CompClosure, Handle::Withheld, Marshalled, outcome_value, ErrorRecord::claim]
 ---
 
 # Runtime values are value closures
 
-**There is one value syntax: a runtime value is a value closure ⟨V, ρ⟩ over
-`ir::Val`, not a second calculus.** Its root is not a variable, and ρ binds
-every *direct name*: an occurrence outside a thunk. A computation closure
-⟨M, ρ⟩ belongs to the machine, not to the value grammar.
+**A runtime value is a pair ⟨V, ρ⟩ of `ir::Val` syntax and the environment
+closing it, and nothing else.** `ValClos(Val, Env)` is that pair; its root V is
+never a variable, and ρ binds every *direct name* of V: an occurrence outside a
+thunk. A computation closure ⟨M, ρ⟩ belongs to the machine, not to the value
+grammar. `Val` has one form per kind of value; the runtime adds none.
 
 ## Decision
 
@@ -25,16 +26,21 @@ every *direct name*: an occurrence outside a thunk. A computation closure
   capture. `ValClos::thunk` restricts to the body's occurrences; names in the
   body resolve ρ then Σ when it runs
   ([[260926_a-closure-keeps-only-what-it-mentions|a closure keeps only what it mentions]]).
-- **A component shares ρ.** Reading V′ from ⟨V, ρ⟩ yields ⟨V′, ρ⟩; a variable
-  yields its bound value. No read restricts or consults Σ. `View` exposes one
-  layer; a variant's absent payload means resolved unit, including a variable
-  bound to unit.
-- **Built data has implicit variables.** A built list is ⟨[xᵢ], {xᵢ ↦ vᵢ}⟩, a
-  built map ⟨[:, k: xₖ…], {xₖ ↦ vₖ}⟩, held as persistent vectors and ordered
-  maps: logarithmic updates, and keys that are not lexical names. A variant
-  shares its payload's syntax and ρ and binds a built collection, builtin,
-  handle or η residual payload to one fresh name, so those occur only at a
-  closure's root.
+- **A borrowed value is a pair of borrows.** `VClosRef(&Val, &Env)` has the
+  same invariant. `VClosRef::sub(V′, ρ)` is the one way to read a component: a
+  variable becomes its binding in one lookup (a bound value's root is never a
+  variable), anything else is ⟨V′, ρ⟩ sharing ρ. No read restricts or consults
+  Σ. Every observation (`view`, `shape`, `found`, `residual`, the decoders,
+  equality, order, `Display`, the first-order walk) is defined once on
+  `VClosRef`; `ValClos` forwards. `VClosRef::into_owned` keeps a value past its
+  borrow: ⟨V′, ρ⟩ sharing ρ, except that a V′ naming nothing gets ∅.
+- **`view()` reads the head constructor only.** `View` has one case per head;
+  a `Variant`'s payload is a `VClosRef`, a bare tag's is `()`, and a list or
+  map is a one-case `ListRef`/`MapRef` whose `get` and `iter` resolve elements
+  through `sub`. Nothing below the head is formed or inspected until asked.
+- **A tag spine is read iteratively** (`VClosRef::peel_variants`). A variant
+  `` `l v `` shares v's ρ; a builtin, handle or η-residual payload is bound to
+  a fresh name, so those occur only at a closure's root, never beneath a tag.
 - **Builtins force to η-expansions.** An arity-n entry forces to
   ⟨λa₀…λaₙ₋₁. δ(b; a⃗), {b ↦ c}⟩. β binds each argument; δ reads the entry and
   arguments from ρ. Partial application is an ordinary residual λ, boxed by a
@@ -43,8 +49,65 @@ every *direct name*: an occurrence outside a thunk. A computation closure
 - **Returns are fused.** The machine state is a `CompClosure`: ⟨M, ρ⟩ or
   `Err(e)`. `Stack::settle` hands a produced value down the continuation at
   once, so there is no value register and no `return` node at runtime.
-  `raise e` is `Err(e)`, not an IR form, so runtime explanations need no
-  equality or serialisation in the IR.
+
+## Built data is ordinary syntax
+
+**A list or map built at run time is a value like any other: syntax over
+variables bound in ρ.** A list is ⟨[x₀…xₙ], {xᵢ ↦ vᵢ}⟩, a map
+⟨[:, k: xₖ…], {xₖ ↦ vₖ}⟩. There is no separate built representation.
+
+- **Placement.** Putting v = ⟨W, σ⟩ into a node whose environment is ρ
+  (`Env::place`): if W is an atom (unit, bool, int, float, string, bytes) it is
+  inlined; anything else is bound in ρ under a fresh `%itemK` and the element
+  is that variable. *Why:* syntax that names something never moves under an
+  environment that could capture it, and a builtin, handle or η residual is
+  never inline below a root. Inlining every name-free value would let
+  `acc = [$acc]` in a loop build one deeply nested `Val`; with atoms only,
+  runtime nesting always goes through ρ, so marshalling (an explicit-stack
+  walk over environments) and drop stay iterative.
+- **Fresh names are local.** A node built from scratch binds `%item0…%itemN`;
+  adding to an existing ρ binds the first `%itemK`, K ≥ |ρ|, that ρ does not
+  bind. There is no global counter, and the elaborator never writes the tag.
+- **Operations** (`ListRef`, called by the evaluator and builtins; none
+  reimplements them):
+  - *cons, snoc* place one element in the list's own ρ: a persistent push and
+    at most one persistent `Env` insert, O(log n).
+  - *concat* appends the nodes when both sides share ρ (pointer-equal);
+    otherwise the larger side keeps its ρ and each element of the smaller is
+    placed in it, O(smaller side). Syntax is never renamed.
+  - *tail* (`suffix`, the `[x, ...rest]` pattern) splits the node and keeps ρ,
+    O(log n). **`rest` keeps the bindings of the elements it dropped until it
+    dies.** This is the one accepted exception to
+    [[260926_a-closure-keeps-only-what-it-mentions|a closure keeps only what it mentions]]:
+    restricting at every step would make a loop over a list O(n²).
+  - *maps* are built fresh (`ValClos::map`); the last pair wins.
+- **Nodes are persistent, occurrences lazy.** A list node holds
+  `imbl::Vector<Spanned<Val>>`; a record or map node holds
+  `imbl::OrdMap<Name, Spanned<Val>>`, sorted and distinct by construction. A
+  `Node`'s occurrence set is computed on first use (`OnceLock`): only source
+  literals are restricted at formation, so a built node never pays for one.
+- **Fields are an `IrData` associated type**, like `Bytes` and `Scheme`: the
+  persistent map at run time, a pair sequence on the wire. The structural
+  decoder stays free of semantic checks; `marshal/read/ir.rs`
+  (`admit_sorted_fields`) refuses a repeated or unordered key with a typed
+  `DuplicateField`/`UnorderedField` at its path, for records, maps, `within`
+  and `grant` alike. The elaborator refuses a key written twice in a literal
+  (T0022), since a node holds one value per key.
+
+## Errors are not values
+
+**An error is the 0-ary operation `error_r()`; it is never held.** In the
+machine it is `Err(e)`. Its handler (`try`, `poll`, `audit`, a `guard` release)
+turns it into the record `{frame, message, status, site}` (`ErrorFact::record`)
+and the error no longer exists. A caught failure is that record as plain data:
+`ValClos::from_datum`, closed syntax with ρ = ∅. No value form carries an
+`ErrorFact`.
+
+`raise r` therefore always decodes the record and raises it as the program's
+own claim (`ErrorRecord::claim`): frame, message, status and site are kept; the
+failure's internal typed reason is not. The record programs see is unchanged.
+A worker's failure crosses as an `ErrorFact`, which `await` re-raises live; it
+is never routed through a record value.
 
 ## Why η, not argument counting
 
@@ -56,7 +119,7 @@ lets `force map` see one argument; returning a thunk there makes it meet
 like every λ.
 
 δ's entry comes from ρ, not Σ, so a host hook or override keeps its own
-builtin identity. `ValClos::block` hands the checker only a non-residual
+builtin identity. `VClosRef::block` hands the checker only a non-residual
 thunk, which keeps δ out of inference. A residual has type name `Lambda`,
 displays its builtin and supplied-argument count, and crosses as builtin
 name, environment row and count; the receiver rebuilds its own η suffix.
@@ -78,20 +141,20 @@ inherited image** ([[map/core/transport|transport]],
 ## Representation boundaries
 
 - **∅ is refcount-free.** `Env::EMPTY` allocates nothing; small environments
-  are `ThinArc`. Compiled bounds: `Env ≤ 16`, `ValClos ≤ 48`, `Frame ≤ 128`
-  bytes. Fused return avoids a per-result syntax allocation; larger values and
-  η's binds remain real costs.
-- **Tag spines are walked once.** Ownership operations, semantic walks and
-  value conversions treat a spine iteratively (`ValClos::peel_variants`).
-- **Dropping is trampolined.** A dying value queues the capture, built vector
-  or built map it alone owns, so a value of any nesting drops in constant
-  stack. Other walks over built data, and raw IR owners, claim no stack
-  safety.
-- **The wire carries values as held.** Closures keep syntax and environment
-  row; built lists and maps name shared rows; builtins cross by name, handles
-  by title, residuals by name, row and count, caught failures by their fact.
-  `Val::Builtin`, `Val::Handle` and `CompKind::Builtin` skip serde; the reader
-  rebuilds residuals with `BuiltinEntry::residual`, never decoded δ syntax.
+  are `ThinArc`, large ones an `imbl` map, so an insert is O(log n) at any
+  size. Compiled bounds: `Env ≤ 16`, `ValClos ≤ 48`, `Frame ≤ 128` bytes.
+  Fused return avoids a per-result syntax allocation; larger values and η's
+  binds remain real costs.
+- **Dropping is trampolined.** A dying value queues each environment and each
+  uniquely owned list, record or map node it alone owns, and a tag spine is
+  walked in a loop, so a value of any nesting drops in constant stack. Raw IR
+  owners claim no such safety.
+- **The wire carries values as held.** One row kind remains, `Row::Env`. A
+  value is `Value::Closure { tags, val, env }`, `Builtin` by name, `Residual`
+  by name, row and count, or `Handle` by title; a built list or map is a
+  closure like any other. `Val::Builtin`, `Val::Handle` and `CompKind::Builtin`
+  skip serde; the reader rebuilds residuals with `BuiltinEntry::residual`,
+  never decoded δ syntax.
 
 This decision fixes the value representation the
 [[map/core/evaluator|evaluator]] steps over and that
@@ -100,16 +163,24 @@ partitions.
 
 ## Where
 
-- `core/src/ir.rs`: `Val`, `CompKind::Builtin`, the `Explicit` phase; it names
-  `crate::builtin` and `crate::handle`, nothing in `crate::shell`.
-- `core/src/shell/runtime/{value,env,list,map}.rs`: `ValClos`, `View`,
-  `ValClos::block`, one-layer `read`, the drop trampoline, `Env`, `ListRef`,
-  `MapRef`; `core/src/builtin.rs`: `BuiltinEntry::eta`,
+- `core/src/ir.rs`: `Val`, `Node`, `IrData` and its `Fields`, `CompKind::Builtin`,
+  the `Explicit` phase; it names `crate::builtin` and `crate::handle`, nothing
+  in `crate::shell`.
+- `core/src/ir/value.rs`: `ValClos`, `VClosRef`, `View`, the drop trampoline;
+  `ir/value/list.rs`: `ListRef` and the list operations; `ir/value/map.rs`:
+  `MapRef`, `ValClos::map`; `ir/value/first_order.rs`: `FOValue` conversions;
+  `ir/env.rs`: `Env`, `Binding`, `Env::place`.
+- `core/src/shell/runtime/close.rs`: `ValClos::close`;
+  `shell/runtime/{compare,coerce}.rs`: equality, order and decoders on
+  `VClosRef`; `core/src/builtin.rs`: `BuiltinEntry::eta`,
   `BuiltinEntry::residual`.
 - `core/src/shell/evaluator/machine.rs`: `CompClosure`, `Next`,
-  `Stack::settle`, `Stack::resume`, `Stack::unwind`.
+  `Stack::settle`, `Stack::resume`, `Stack::unwind`;
+  `shell/evaluator/assemble.rs`: cons, snoc and concat for literals and argv;
+  `shell/runtime/error/record.rs`: `outcome_value`;
+  `shell/builtins/misc.rs`: `raise`.
 - `core/src/handle.rs`: `Handle::Withheld`; `core/src/marshal.rs`,
-  `marshal/{wire,write,read}.rs`: `Marshalled`.
-- `core/src/shell/runtime/state/construct.rs`: `Shell::marshal`,
+  `marshal/{wire,write,read}.rs`, `marshal/read/ir.rs`: `Marshalled`;
+  `core/src/shell/runtime/state/construct.rs`: `Shell::marshal`,
   `Shell::child_of`; `exarch/src/shell_eval/builtins/harness.rs`: `` `start ``
   marshals the parent before enquiring.

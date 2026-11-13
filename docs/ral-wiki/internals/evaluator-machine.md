@@ -1,5 +1,5 @@
 ---
-verified_at_commit: d50aa681
+verified_at_commit: 9290eb03
 verified_at_date: 2026-11-13
 anchors: [Machine, Stack, Stack::step, Stack::settle, Stack::eval, Stack::eval_rules, Stack::resume, Stack::unwind, Stack::call, Stack::reserve, Stack::guard_release, CompClosure, Next, Frame, Frame::abandon, Frame::Gather, Frame::Acquire, Frame::Guard, Frame::Cleanup, ValClos, ValClos::close, ValClos::thunk, View, BuiltinEntry::eta, BuiltinEntry::residual, CompKind::Builtin, Node::new, Occ::of, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, NESTED_MACHINE_LIMIT, force, force_val, BroodGuard, exit_brood, exit_case, ExitCase]
 ---
@@ -60,10 +60,12 @@ close(x,ρ,Σ) = lookup(x,ρ,Σ), or Error(undefined x)
 close(V,ρ,Σ) = ⟨V,ρ↾occ(V) + Σ's answers for missing direct names⟩    V not a variable
 ```
 
-- `Node::new` stores `Occ::of`, an over-approximation of the names a node
-  mentions. `close` and `ValClos::thunk` restrict at formation; a component
-  read shares the whole saved ρ and never consults Σ. Names under a thunk
-  resolve ρ then Σ when it runs.
+- A node's `Occ` (`Occ::of`, computed on first use) over-approximates the names
+  it mentions. `close` and `ValClos::thunk` restrict at formation; a component
+  read shares the whole saved ρ and never consults Σ, and `View` reads a
+  head's constructor only. Names under a thunk resolve ρ then Σ when it runs.
+  A list or map built at run time is syntax over `%itemK` variables bound in
+  ρ ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 - `Env::EMPTY` is refcount-free; small environments are `ThinArc`. Compiled
   bounds: `Env ≤ 16`, `ValClos ≤ 48`, `Frame ≤ 128` bytes.
 - No sink, cwd, handler stack, worker ownership or lease enters a capture:
@@ -161,9 +163,9 @@ unwind(Try(h),Escape(a),K;σ) = ⟨raise Escape(a) | K;σ⟩
 ```
 
 - The handler is closed and the body forced before `Try` is pushed; the popped
-  `Try` cannot catch its handler's failure. `record` is the witnessed
-  `[frame, message, status, site]` map; a returned block runs later, outside
-  the catch.
+  `Try` cannot catch its handler's failure. `record` is the plain
+  `[frame, message, status, site]` data, after which the error no longer
+  exists; a returned block runs later, outside the catch.
 
 **`guard` shields acquisition and installs release before the body's first
 poll.** With `o ::= Ok(v) | Err(b)`, `restore(Ok(v)) = D(v)`,
@@ -189,7 +191,7 @@ unwind(Cleanup(o,s₀),b′,K;σ) = ⟨raise b′ | K;σ[scope := s₀]⟩
   success, scope restoration and pushing `Guard` have no intervening poll;
   the body's β polls with `Guard` below its argument.
 - `exit_case` borrows the saved outcome: `ok` omits the body value, `err` is
-  witnessed, `exited` carries the byte, `stopped` the cause. A successful
+  the plain record, `exited` carries the byte, `stopped` the cause. A successful
   release restores the saved outcome; a release error or escape overrides it.
 - Acquisition and release share one grace from the strike, so a late
   acquisition can leave release no time. Shielding is cooperative, not

@@ -1,15 +1,15 @@
 use crate::data::json::{JsonDocument, JsonFormat, decode_structural, serialize_structural};
 use crate::fact::{
     DataStep, DecodeCause, DecodeFailure, EvalFailure, InvalidResidual, ProtocolData,
-    ProtocolFailure, Reason, ResidualDefect, RowDefect, RowKind, UnresolvedRow,
+    ProtocolFailure, Reason, ResidualDefect, RowDefect, UnresolvedRow,
 };
-use crate::ir::{Comp, CompKind, Val};
-use crate::marshal::wire::{self, Row, Value, Wire};
+use crate::ir::{
+    Comp, CompKind, Explicit, Name, Node, Prim, VClosRef, Val, ValClos, View, block_over, captured,
+};
+use crate::marshal::wire::{self, RawData, Row, Value, Wire};
 use crate::marshal::{self, Marshalled};
 use crate::shell::grant::SpawnGrant;
-use crate::shell::runtime::{
-    Break, Error, Mooring, Settled, Shell, ValClos, View, block_over, captured, outcome_value,
-};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell, outcome_value};
 use crate::source::Spanned;
 use std::sync::Arc;
 
@@ -168,14 +168,14 @@ fn live_handles_cross_withheld_in_every_value_position() {
             panic!("{name} remains a list")
         };
         assert_eq!(items.len(), 3);
-        assert_eq!(items.get(1).unwrap().as_ref(), &ValClos::int(7));
+        assert_eq!(items.get(1).unwrap().into_owned(), ValClos::int(7));
         handles.extend([0, 2].map(|index| items.get(index).unwrap().into_owned()));
     }
     let View::Map(map) = child.env.get("map").unwrap().view() else {
         panic!("the map remains a map")
     };
     handles.push(map.get("worker").unwrap().into_owned());
-    let (tags, payload) = child.env.get("tagged").unwrap().peel_variants();
+    let (tags, payload) = VClosRef::from(child.env.get("tagged").unwrap()).peel_variants();
     assert_eq!(
         tags.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
         ["worker"]
@@ -225,7 +225,7 @@ fn bare_zero_supplied_and_partial_builtins_saturate_in_the_child() {
     for name in ["bare", "zero", "partial", "tagged"] {
         let value = child.env.get(name).unwrap().clone();
         let value = if name == "tagged" {
-            let (tags, payload) = value.peel_variants();
+            let (tags, payload) = VClosRef::from(&value).peel_variants();
             assert_eq!(tags.iter().map(AsRef::as_ref).collect::<Vec<_>>(), ["ok"]);
             payload.into_owned()
         } else {
@@ -379,63 +379,44 @@ fn residuals_require_fewer_than_arity_arguments_and_the_exact_eta_environment() 
 }
 
 #[test]
-fn row_references_refuse_forward_out_of_range_and_wrong_kinds_at_their_paths() {
-    for built in [false, true] {
-        for row in [1, 2, u32::MAX, 0] {
-            let mut wire = raw();
-            wire.rows = vec![
-                if built {
-                    Row::Env(Vec::new())
-                } else {
-                    Row::List(Vec::new())
-                },
-                Row::Env(vec![(
-                    "reference".into(),
-                    binding(if built {
-                        Value::Built(row)
-                    } else {
-                        Value::Closure {
-                            tags: Vec::new(),
-                            val: Val::Unit,
-                            env: Some(row),
-                        }
-                    }),
-                )]),
-                Row::Env(Vec::new()),
-            ];
-            wire.env = Some(1);
-            let mut path = binding_path(1, 0);
-            path.push(DataStep::Payload(
-                if built { "Built" } else { "Closure" }.into(),
-            ));
-            if !built {
-                path.push(DataStep::Field("env".into()));
-            }
-            assert_eq!(
-                refused(&encoded(&wire)),
-                DecodeFailure {
-                    path,
-                    cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
-                        row: u64::from(row).into(),
-                        wanted: if built {
-                            RowKind::Built
-                        } else {
-                            RowKind::Environment
-                        },
-                        defect: match row {
-                            0 if built => RowDefect::WrongKind(RowKind::Environment),
-                            0 => RowDefect::WrongKind(RowKind::Built),
-                            u32::MAX => RowDefect::Absent(3usize.into()),
-                            _ => RowDefect::Forward(1usize.into()),
-                        },
-                    })),
-                }
-            );
-        }
-    }
-    for row in [0, 1, u32::MAX] {
+fn row_references_refuse_forward_and_out_of_range_rows_at_their_paths() {
+    for row in [1, 2, u32::MAX] {
         let mut wire = raw();
-        wire.rows = vec![Row::List(Vec::new())];
+        wire.rows = vec![
+            Row::Env(Vec::new()),
+            Row::Env(vec![(
+                "reference".into(),
+                binding(Value::Closure {
+                    tags: Vec::new(),
+                    val: Val::Unit,
+                    env: Some(row),
+                }),
+            )]),
+            Row::Env(Vec::new()),
+        ];
+        wire.env = Some(1);
+        let mut path = binding_path(1, 0);
+        path.extend([
+            DataStep::Payload("Closure".into()),
+            DataStep::Field("env".into()),
+        ]);
+        assert_eq!(
+            refused(&encoded(&wire)),
+            DecodeFailure {
+                path,
+                cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
+                    row: u64::from(row).into(),
+                    defect: match row {
+                        u32::MAX => RowDefect::Absent(3usize.into()),
+                        _ => RowDefect::Forward(1usize.into()),
+                    },
+                })),
+            }
+        );
+    }
+    for row in [1, u32::MAX] {
+        let mut wire = raw();
+        wire.rows = vec![Row::Env(Vec::new())];
         wire.env = Some(row);
         assert_eq!(
             refused(&encoded(&wire)),
@@ -443,11 +424,7 @@ fn row_references_refuse_forward_out_of_range_and_wrong_kinds_at_their_paths() {
                 path: vec![DataStep::Field("env".into())],
                 cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
                     row: u64::from(row).into(),
-                    wanted: RowKind::Environment,
-                    defect: match row {
-                        0 => RowDefect::WrongKind(RowKind::Built),
-                        _ => RowDefect::Absent(1usize.into()),
-                    },
+                    defect: RowDefect::Absent(1usize.into()),
                 })),
             }
         );
@@ -456,10 +433,10 @@ fn row_references_refuse_forward_out_of_range_and_wrong_kinds_at_their_paths() {
 
 #[test]
 fn residual_environment_references_obey_the_same_reference_law() {
-    for row in [0, 1, 2, u32::MAX] {
+    for row in [1, 2, u32::MAX] {
         let mut wire = raw();
         wire.rows = vec![
-            Row::Map(Vec::new()),
+            Row::Env(Vec::new()),
             Row::Env(vec![(
                 "residual".into(),
                 binding(Value::Residual {
@@ -481,9 +458,7 @@ fn residual_environment_references_obey_the_same_reference_law() {
                 path,
                 cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
                     row: u64::from(row).into(),
-                    wanted: RowKind::Environment,
                     defect: match row {
-                        0 => RowDefect::WrongKind(RowKind::Built),
                         1 => RowDefect::Forward(1usize.into()),
                         _ => RowDefect::Absent(2usize.into()),
                     },
@@ -494,76 +469,151 @@ fn residual_environment_references_obey_the_same_reference_law() {
 }
 
 #[test]
-fn built_collection_rows_obey_the_same_reference_law() {
-    for map in [false, true] {
-        for row in [0, 1, 2, u32::MAX] {
-            let mut wire = raw();
-            let value = Value::Built(row);
-            wire.rows = vec![
-                Row::Env(Vec::new()),
-                if map {
-                    Row::Map(vec![("key".into(), value)])
-                } else {
-                    Row::List(vec![value])
-                },
-            ];
-            wire.env = None;
-            let mut path = vec![
+fn duplicate_environment_names_are_refused_at_the_duplicate() {
+    let mut wire = raw();
+    wire.rows = vec![Row::Env(vec![
+        ("same".into(), binding(unit())),
+        ("same".into(), binding(unit())),
+    ])];
+    wire.env = None;
+    assert_eq!(
+        refused(&encoded(&wire)),
+        DecodeFailure {
+            path: vec![
                 DataStep::Field("rows".into()),
-                DataStep::Index(1usize.into()),
-                DataStep::Payload(if map { "Map" } else { "List" }.into()),
                 DataStep::Index(0usize.into()),
-            ];
-            if map {
-                path.push(DataStep::Index(1usize.into()));
-            }
-            path.push(DataStep::Payload("Built".into()));
+                DataStep::Payload("Env".into()),
+                DataStep::Index(1usize.into()),
+                DataStep::Index(0usize.into()),
+            ],
+            cause: Box::new(DecodeCause::DuplicateField("same".into())),
+        }
+    );
+}
+
+type RawVal = Val<Explicit, RawData>;
+type RawPairs = Vec<(Name, Spanned<RawVal>)>;
+/// A node's constructor and the path to its fields.
+type NodeCase = (fn(RawPairs) -> RawVal, Vec<DataStep>);
+
+/// A parent whose environment binds one closure over `val`, and the path to
+/// that `val`.
+fn parent_over(val: RawVal) -> (Marshalled, Vec<DataStep>) {
+    let mut wire = raw();
+    wire.rows = vec![Row::Env(vec![(
+        "value".into(),
+        binding(Value::Closure {
+            tags: Vec::new(),
+            val,
+            env: None,
+        }),
+    )])];
+    wire.env = Some(0);
+    let mut path = binding_path(0, 0);
+    path.extend([
+        DataStep::Payload("Closure".into()),
+        DataStep::Field("val".into()),
+    ]);
+    (encoded(&wire), path)
+}
+
+fn pairs(keys: &[&str]) -> RawPairs {
+    keys.iter()
+        .map(|key| ((*key).into(), Spanned::synthetic(Val::Unit)))
+        .collect()
+}
+
+fn thunk_of(comp: CompKind<Explicit, RawData>) -> RawVal {
+    Val::thunk(Arc::new(Spanned::synthetic(comp)))
+}
+
+/// The wire keeps pairs as written; admission refuses a repeated or unordered key.
+#[test]
+fn nodes_with_a_repeated_or_unordered_key_are_refused_at_the_offending_pair() {
+    let payload = |name: &str| DataStep::Payload(name.into());
+    let field = |name: &str| DataStep::Field(name.into());
+    let comp_at = |kind: &str, label: &str| {
+        vec![payload("Thunk"), field("item"), payload(kind), field(label)]
+    };
+    let cases: [NodeCase; 4] = [
+        (
+            |fields| Val::Record(Node::new(fields)),
+            vec![payload("Record")],
+        ),
+        (|fields| Val::Map(Node::new(fields)), vec![payload("Map")]),
+        (
+            |opts| {
+                thunk_of(CompKind::Within {
+                    opts: Node::new(opts),
+                    body: Val::Unit,
+                })
+            },
+            comp_at("Within", "opts"),
+        ),
+        (
+            |caps| {
+                thunk_of(CompKind::Grant {
+                    caps: Node::new(caps),
+                    body: Val::Unit,
+                })
+            },
+            comp_at("Grant", "caps"),
+        ),
+    ];
+    for (build, prefix) in cases {
+        for (keys, pair, cause) in [
+            (
+                &["a", "a"][..],
+                1usize,
+                DecodeCause::DuplicateField("a".into()),
+            ),
+            (
+                &["a", "b", "b", "c"],
+                2,
+                DecodeCause::DuplicateField("b".into()),
+            ),
+            (&["b", "a"], 1, DecodeCause::UnorderedField("a".into())),
+            (&["a", "c", "b"], 2, DecodeCause::UnorderedField("b".into())),
+        ] {
+            let (parent, mut path) = parent_over(build(pairs(keys)));
+            path.extend(prefix.clone());
+            path.extend([DataStep::Index(pair.into()), DataStep::Index(0usize.into())]);
             assert_eq!(
-                refused(&encoded(&wire)),
+                refused(&parent),
                 DecodeFailure {
                     path,
-                    cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
-                        row: u64::from(row).into(),
-                        wanted: RowKind::Built,
-                        defect: match row {
-                            0 => RowDefect::WrongKind(RowKind::Environment),
-                            1 => RowDefect::Forward(1usize.into()),
-                            _ => RowDefect::Absent(2usize.into()),
-                        },
-                    }))
-                }
+                    cause: Box::new(cause)
+                },
+                "{keys:?}"
             );
         }
     }
 }
 
 #[test]
-fn duplicate_environment_names_and_map_keys_are_refused_at_the_duplicate() {
-    for map in [false, true] {
-        let mut wire = raw();
-        wire.rows = vec![if map {
-            Row::Map(vec![("same".into(), unit()), ("same".into(), unit())])
-        } else {
-            Row::Env(vec![
-                ("same".into(), binding(unit())),
-                ("same".into(), binding(unit())),
-            ])
-        }];
-        wire.env = None;
-        assert_eq!(
-            refused(&encoded(&wire)),
-            DecodeFailure {
-                path: vec![
-                    DataStep::Field("rows".into()),
-                    DataStep::Index(0usize.into()),
-                    DataStep::Payload(if map { "Map" } else { "Env" }.into()),
-                    DataStep::Index(1usize.into()),
-                    DataStep::Index(0usize.into()),
-                ],
-                cause: Box::new(DecodeCause::DuplicateField("same".into())),
-            }
-        );
-    }
+fn record_update_fields_repeating_a_key_are_refused_at_the_repeat() {
+    let field = |key: &str| (key.into(), Spanned::synthetic(Val::Unit));
+    let update = thunk_of(CompKind::Prim(Prim::Update {
+        base: Spanned::synthetic(Val::Unit),
+        fields: Box::new([field("a"), field("b"), field("a")]),
+    }));
+    let (parent, mut path) = parent_over(update);
+    path.extend([
+        DataStep::Payload("Thunk".into()),
+        DataStep::Field("item".into()),
+        DataStep::Payload("Prim".into()),
+        DataStep::Payload("Update".into()),
+        DataStep::Field("fields".into()),
+        DataStep::Index(2usize.into()),
+        DataStep::Index(0usize.into()),
+    ]);
+    assert_eq!(
+        refused(&parent),
+        DecodeFailure {
+            path,
+            cause: Box::new(DecodeCause::DuplicateField("a".into())),
+        }
+    );
 }
 
 #[test]
@@ -643,7 +693,7 @@ fn malformed_environment_rows_are_structural_failures_at_the_row_payload() {
 }
 
 #[test]
-fn caught_failure_witnesses_reraise_the_typed_reason_including_under_err() {
+fn a_caught_failure_crosses_as_closed_record_data_including_under_err() {
     use crate::test_access::bind_untyped;
 
     let mut parent = crate::test_helper::core_shell();
@@ -654,27 +704,19 @@ fn caught_failure_witnesses_reraise_the_typed_reason_including_under_err() {
         vec![ValClos::withheld("ancestor worker")],
     ));
     let fact = caught.fact(&parent);
-    bind_untyped(&mut parent, "caught", ValClos::failure(fact.clone()));
-    bind_untyped(&mut parent, "outcome", outcome_value(Err(fact.clone())));
-    let mut child = child(&parent);
-    let raise = builtin(&child, "raise");
-    for name in ["caught", "outcome"] {
-        let value = child.env.get(name).unwrap().clone();
-        let value = if name == "outcome" {
-            let (tags, payload) = value.peel_variants();
-            assert_eq!(tags.iter().map(AsRef::as_ref).collect::<Vec<_>>(), ["err"]);
-            payload.into_owned()
-        } else {
-            value
-        };
-        let View::Map(map) = value.view() else {
-            panic!("a caught failure remains a map")
-        };
-        assert_eq!(map.witness(), Some(&fact));
-        let raised = error(apply(&mut child, &raise, vec![value]));
-        assert_eq!(raised.reason, caught.reason);
-        assert_eq!(raised.fact(&child), fact);
-    }
+    let record = ValClos::from_datum(fact.record());
+    bind_untyped(&mut parent, "caught", record.clone());
+    bind_untyped(&mut parent, "outcome", outcome_value(Err(fact)));
+    let child = child(&parent);
+
+    let sent = child.env.get("caught").unwrap();
+    assert!(matches!(sent.view(), View::Map(_)));
+    assert!(sent.parts().1.is_empty(), "a record is closed syntax");
+    assert_eq!(sent, &record);
+    let outcome = child.env.get("outcome").unwrap();
+    let (tags, payload) = VClosRef::from(outcome).peel_variants();
+    assert_eq!(tags.iter().map(AsRef::as_ref).collect::<Vec<_>>(), ["err"]);
+    assert_eq!(payload.into_owned(), record);
 }
 
 #[test]
@@ -712,28 +754,4 @@ fn a_document_nested_past_the_limit_is_refused_before_it_is_decoded() {
         refused(&nested(limit + 1)),
         DecodeFailure::new(DecodeCause::TooDeep(limit.into()))
     );
-}
-
-#[test]
-fn a_failure_that_is_no_error_fact_is_refused_at_its_value() {
-    use crate::data::FOValue;
-    use crate::data::json::{RawDatum, RawFOValue};
-    let mut wire = raw();
-    wire.rows = vec![Row::Env(vec![(
-        "failure".into(),
-        binding(Value::Failure(RawDatum::new(RawFOValue::from_value(
-            FOValue::Unit,
-        )))),
-    )])];
-    wire.env = Some(0);
-    let error = refused(&encoded(&wire));
-    assert_eq!(
-        error.path,
-        [
-            binding_path(0, 0),
-            vec![DataStep::Payload("Failure".into())]
-        ]
-        .concat()
-    );
-    assert!(matches!(*error.cause, DecodeCause::Shape(_)));
 }

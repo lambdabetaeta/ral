@@ -283,14 +283,14 @@ Prefer `with-temp-dir { |dir| … }` or `with-temp-file { |file| … }` for temp
 
 `guard ACQUIRE BODY RELEASE` is the underlying form: `guard { temp-file } { |file| use-file $file } { |file end| rm -f $file }`. ACQUIRE binds like `let`: a command acquisition hands its output on as the resource. The release receives the resource and `` `ok | `err Error | `exited Int | `stopped Cause ``; its value is discarded and the body's outcome continues unchanged. A release that halts pre-empts it; an acquisition that halts runs no release. Acquisition and release share one cleanup-grace budget from the stop's arrival. A delegated worker is shielded only if its `gather` is opened inside acquisition or release; birth there does not shield a worker of an enclosing gather, worker body, or session. The shield delays ral's cooperative stops, not terminal signals to external children. To ignore a release failure, use `{ |resource _| attempt { release-resource $resource } }`.
 
-Raise a fresh error with `fail #'failure caused by x'#` (status 1). Re-raise a caught record unchanged with `raise $e`; use top-level `exit n` to choose a process code. `raise` also takes a hand-built record with exactly the fields `frame`, `message`, `status` and `site`, and raises it as given, provenance included, so `raise [...$e, status: 2]` fails with status 2; it refuses a status of 0, which is success (use `return`), and a status above 255. Situational advice and unwind notes are not in the record.
+Raise a fresh error with `fail #'failure caused by x'#` (status 1). Raise a caught record again with `raise $e`; use top-level `exit n` to choose a process code. `raise` takes any record with exactly the fields `frame`, `message`, `status` and `site`, caught, changed or hand-built, and raises it as your own claim, keeping those four fields as given, so `raise [...$e, status: 2]` fails with status 2; it refuses a status of 0, which is success (use `return`), and a status above 255. Situational advice and unwind notes are not in the record, and the original failure's typed cause is not restored.
 
 
 ## Audit
 
 `audit { … }` evaluates its body and returns a report with two fields: `outcome`, which is `` `ok `` of the value the body returned or `` `err `` of an error record, and `trail`, a flat list of everything the body did. `audit` turns recoverable runtime failures into data; `exit`, Ctrl-C, and the tool timeout stop the run instead. It keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr.
 
-Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, one record per call. Inspect the outcome without assuming that a failure means no matches; diagnose and re-raise it:
+Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, one record per call. Inspect the outcome without assuming that a failure means no matches; diagnose it, then raise it again:
 
     let r = audit { grep -c ERROR app.log }
     case $r[outcome] [

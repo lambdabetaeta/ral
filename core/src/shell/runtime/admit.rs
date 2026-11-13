@@ -9,8 +9,9 @@ use crate::fact::{
     AdmissionCause, AdmissionExtraField, AdmissionFailure, AdmissionShares, AdmissionUses,
     Expected, Found, InvalidCause, ValueShape,
 };
+use crate::ir::{MapRef, VClosRef, ValClos, View};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Break, MapRef, Settled, Shell, ValClos, View};
+use crate::shell::runtime::{Break, Settled, Shell};
 use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::{Fields, Fixed, Fixings, Head, Id, Kind, Shape, Side, Site, Tail, UnitId};
@@ -19,7 +20,7 @@ use std::fmt;
 // ── Fixings ─────────────────────────────────────────────────────────────
 
 /// Which side of the number/text line `value` is on, if it is on one.
-fn side(value: &ValClos) -> Option<Side> {
+fn side(value: VClosRef<'_>) -> Option<Side> {
     match value.view() {
         View::Int(_) | View::Float(_) => Some(Side::Number),
         View::String(_) => Some(Side::Text),
@@ -123,7 +124,7 @@ impl Site {
     /// # Errors
     /// The first place the value and the type disagree.
     pub fn admit(&self, value: &ValClos, fixings: &Fixings) -> Result<(), Mismatch> {
-        self.walk(self.root, value, fixings)
+        self.walk(self.root, value.into(), fixings)
     }
 
     /// `value` let in at `door`, or `door`'s refusal of it.
@@ -136,7 +137,7 @@ impl Site {
         Ok(value)
     }
 
-    fn walk(&self, id: Id, value: &ValClos, fixings: &Fixings) -> Result<(), Mismatch> {
+    fn walk(&self, id: Id, value: VClosRef<'_>, fixings: &Fixings) -> Result<(), Mismatch> {
         Walk {
             site: self,
             fixings,
@@ -177,7 +178,7 @@ impl Walk<'_> {
         }
     }
 
-    fn uses(&self, value: &ValClos, expected: Expected, witness: Option<Span>) -> Mismatch {
+    fn uses(&self, value: VClosRef<'_>, expected: Expected, witness: Option<Span>) -> Mismatch {
         self.uses_found(value.found(), expected, witness)
     }
 
@@ -191,7 +192,7 @@ impl Walk<'_> {
     fn run(
         &mut self,
         mut id: Id,
-        value: &ValClos,
+        value: VClosRef<'_>,
         inherited: Option<Span>,
     ) -> Result<(), Mismatch> {
         let (labels, terminal) = value.peel_variants();
@@ -252,7 +253,7 @@ impl Walk<'_> {
                 }
                 self.path
                     .extend((index..labels.len()).map(|_| Step::Key("payload".into())));
-                return self.data(&terminal, at);
+                return self.data(terminal, at);
             }
             let node = &self.site.nodes[id];
             let at = node.witness.or(at);
@@ -267,21 +268,19 @@ impl Walk<'_> {
                 | (Shape::Thunk(_), View::Thunk { .. } | View::Builtin(_)) => Ok(()),
                 (Shape::List(elem), View::List(items)) => {
                     for (index, item) in items.iter().enumerate() {
-                        self.below(Step::At(index), |w| w.run(*elem, &item, at))?;
+                        self.below(Step::At(index), |w| w.run(*elem, item, at))?;
                     }
                     Ok(())
                 }
                 (Shape::Map(elem), View::Map(entries)) => {
-                    for (key, item) in entries {
-                        self.below(Step::Key(key.to_string()), |w| w.run(*elem, &item, at))?;
+                    for (key, item) in entries.iter() {
+                        self.below(Step::Key(key.to_string()), |w| w.run(*elem, item, at))?;
                     }
                     Ok(())
                 }
                 (Shape::Record(fields), View::Map(entries)) => self.record(fields, entries, at),
-                (Shape::Free { var, kind, weak }, _) => {
-                    self.free(*var, *kind, *weak, &terminal, at)
-                }
-                (shape, _) => Err(self.uses(&terminal, expected(shape), at)),
+                (Shape::Free { var, kind, weak }, _) => self.free(*var, *kind, *weak, terminal, at),
+                (shape, _) => Err(self.uses(terminal, expected(shape), at)),
             }
         })();
         self.path.truncate(saved);
@@ -298,9 +297,9 @@ impl Walk<'_> {
             let Some(item) = entries.get(name) else {
                 return Err(self.mismatch(at, AdmissionCause::NoField(name.clone())));
             };
-            self.below(Step::Key(name.clone()), |w| w.run(*id, &item, at))?;
+            self.below(Step::Key(name.clone()), |w| w.run(*id, item, at))?;
         }
-        for (key, item) in entries {
+        for (key, item) in entries.iter() {
             if fields.labels.iter().any(|(name, _)| name == key) {
                 continue;
             }
@@ -315,7 +314,7 @@ impl Walk<'_> {
                     ));
                 }
                 Tail::Open { deep: true, .. } => {
-                    self.below(Step::Key(key.to_string()), |w| w.data(&item, at))?;
+                    self.below(Step::Key(key.to_string()), |w| w.data(item, at))?;
                 }
                 Tail::Open { deep: false, .. } => {}
             }
@@ -328,7 +327,7 @@ impl Walk<'_> {
         var: u32,
         kind: Kind,
         weak: bool,
-        value: &ValClos,
+        value: VClosRef<'_>,
         at: Option<Span>,
     ) -> Result<(), Mismatch> {
         if !value.heads().iter().any(|&head| kind.admits(head)) {
@@ -359,24 +358,24 @@ impl Walk<'_> {
     }
 
     /// No block or handle anywhere in `value`.
-    fn data(&mut self, value: &ValClos, at: Option<Span>) -> Result<(), Mismatch> {
+    fn data(&mut self, value: VClosRef<'_>, at: Option<Span>) -> Result<(), Mismatch> {
         let (labels, terminal) = value.peel_variants();
         let saved = self.path.len();
         self.path
             .extend(labels.iter().map(|_| Step::Key("payload".into())));
         let result = (|| match terminal.view() {
             View::Thunk { .. } | View::Builtin(_) | View::Handle(_) => {
-                Err(self.uses(&terminal, Expected::Kind(Kind::Data.into()), at))
+                Err(self.uses(terminal, Expected::Kind(Kind::Data.into()), at))
             }
             View::List(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    self.below(Step::At(index), |w| w.data(&item, at))?;
+                    self.below(Step::At(index), |w| w.data(item, at))?;
                 }
                 Ok(())
             }
             View::Map(entries) => {
-                for (key, item) in entries {
-                    self.below(Step::Key(key.to_string()), |w| w.data(&item, at))?;
+                for (key, item) in entries.iter() {
+                    self.below(Step::Key(key.to_string()), |w| w.data(item, at))?;
                 }
                 Ok(())
             }

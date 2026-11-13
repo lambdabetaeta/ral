@@ -9,8 +9,9 @@ use crate::fact::{
     ArithmeticFailure, EvalFailure, Expected, InvalidCause, InvalidFailure, Number, NumberRange,
     Reason, RoundUnrepresentable, ShapeFailure, ValueShape,
 };
+use crate::ir::{ValClos, View};
+use crate::shell::runtime::Settled;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Settled, ValClos, View};
 
 /// The largest `places` for which `10^places` is still finite in `f64`.
 const MAX_PLACES: i64 = 308;

@@ -23,6 +23,12 @@ pub enum CompileError {
     Use { at: Span, refusal: UseRefusal },
 }
 
+impl From<ParseError> for CompileError {
+    fn from(error: ParseError) -> Self {
+        Self::Parse(error)
+    }
+}
+
 /// Why a written module path could not be checked.
 #[derive(Debug, Clone)]
 pub enum UseRefusal {

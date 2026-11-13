@@ -1,12 +1,10 @@
-//! The marshalled form: rows first, each naming only earlier rows; a value
-//! names rows and holds no value.
+//! The marshalled form: environment rows first, each naming only earlier rows;
+//! a value names a row and holds no value.
 
-use crate::data::json::RawDatum;
-use crate::fact::ErrorFact;
-use crate::ir::{Explicit, IrData, Val};
+use crate::ir::{Explicit, IrData, Name, Phase, Val};
 use crate::shell::grant::RawSpawnGrant;
 use crate::shell::runtime::{FrameKind, RawContext, Terms};
-use crate::source::SourceDb;
+use crate::source::{SourceDb, Spanned};
 use crate::ty::{Fixings, Scheme};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -17,6 +15,8 @@ pub(super) enum RawData {}
 impl IrData for RawData {
     type Bytes = String;
     type Scheme = Arc<Scheme>;
+    /// Pairs as written: any order, any repeat, until admission.
+    type Fields<P: Phase> = Vec<(Name, Spanned<Val<P, Self>>)>;
 }
 
 pub(super) type RowId = u32;
@@ -38,9 +38,6 @@ pub(super) struct Wire<D: IrData = RawData> {
 pub(super) enum Row<D: IrData = RawData> {
     /// An environment: each name once.
     Env(Vec<(String, Binding<D>)>),
-    List(Vec<Value<D>>),
-    /// Each key once.
-    Map(Vec<(String, Value<D>)>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,8 +73,4 @@ pub(super) enum Value<D: IrData = RawData> {
     },
     /// A handle's title; it arrives withheld.
     Handle(String),
-    /// A caught failure record's `ErrorFact`.
-    Failure(RawDatum<ErrorFact>),
-    /// The built list or map that row holds.
-    Built(RowId),
 }

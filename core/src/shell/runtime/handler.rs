@@ -1,13 +1,12 @@
 //! The user handler stack, ordered innermost-last. Scoped frames come off by
 //! handle; host-installed handler frames also come off by name.
 
-use super::value::ValClos;
-use super::{Break, Env, Shell, ill_typed};
+use super::{Break, Shell, ill_typed};
 use crate::builtin::BuiltinEntry;
 use crate::fact::{
     BlockRole, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape,
 };
-use crate::ir::Comp;
+use crate::ir::{Comp, Env, ValClos};
 use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
@@ -344,7 +343,7 @@ mod tests {
     fn a_residual_is_refused_as_a_handler_arm() {
         let mut shell = crate::test_helper::core_shell();
         let entry = shell.lookup_builtin("map").expect("map builtin");
-        let function = crate::shell::runtime::block_over(&shell.env);
+        let function = crate::ir::block_over(&shell.env);
         let residual = crate::shell::evaluator::machine::apply(
             ValClos::builtin(Arc::new(entry)),
             vec![function],

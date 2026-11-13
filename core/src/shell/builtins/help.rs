@@ -7,11 +7,11 @@
 use crate::authority::policy::Program;
 use crate::io::ansi::{BOLD, CYAN, DIM, RESET};
 use crate::io::terminal;
-use crate::ir::CommandName;
+use crate::ir::{Binding, CommandName, ValClos};
 use crate::path::shown;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::shell::exec::command::{Command, LookupFailure};
-use crate::shell::runtime::{Binding, HandlerLookup, Settled, Shell, ValClos};
+use crate::shell::runtime::{HandlerLookup, Settled, Shell};
 use crate::typecheck::builtin_type_hint;
 use std::fmt::{self, Write};
 use std::path::PathBuf;

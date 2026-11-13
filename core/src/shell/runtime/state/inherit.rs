@@ -225,8 +225,9 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::block_over;
     use crate::shell::runtime::state::DEFAULT_STACK_LIMIT;
-    use crate::shell::runtime::{DefaultPolicy, HookName, HookSig, block_over};
+    use crate::shell::runtime::{DefaultPolicy, HookName, HookSig};
 
     fn inherited() -> Streams<Sink> {
         Streams {

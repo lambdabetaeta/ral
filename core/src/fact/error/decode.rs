@@ -413,24 +413,6 @@ record!(OpenScheme {
     variable: "variable"
 });
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub enum RowKind {
-    Environment,
-    Built,
-}
-label!(RowKind);
-
-impl RowKind {
-    #[must_use]
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::Environment => "an environment",
-            Self::Built => "a built list or map",
-        }
-    }
-}
-
 /// Why a named row cannot be used where it is named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowDefect {
@@ -439,20 +421,16 @@ pub enum RowDefect {
     Forward(Count),
     /// The image holds this many rows, none of them the one named.
     Absent(Count),
-    /// An earlier row of the other kind.
-    WrongKind(RowKind),
 }
-variant!(RowDefect { Forward(Count): "forward", Absent(Count): "absent", WrongKind(RowKind): "wrong-kind" });
+variant!(RowDefect { Forward(Count): "forward", Absent(Count): "absent" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedRow {
     pub row: Count,
-    pub wanted: RowKind,
     pub defect: RowDefect,
 }
 record!(UnresolvedRow {
     row: "row",
-    wanted: "wanted",
     defect: "defect"
 });
 
@@ -733,7 +711,7 @@ impl DecodeCause {
 impl UnresolvedRow {
     #[must_use]
     pub fn describe(&self) -> String {
-        let head = format!("names row {} as {}", self.row, self.wanted.describe());
+        let head = format!("names environment row {}", self.row);
         match &self.defect {
             RowDefect::Forward(before) => format!(
                 "{head}, but rows are read in order and only the {} before it can be named; that row comes later",
@@ -743,9 +721,6 @@ impl UnresolvedRow {
                 "{head}, but the image holds only {}",
                 crate::text::plural(rows.to_u64(), "row")
             ),
-            RowDefect::WrongKind(found) => {
-                format!("{head}, but that row is {}", found.describe())
-            }
         }
     }
 }
@@ -1036,50 +1011,31 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_row_projects_reference_kind_and_defect() {
+    fn unresolved_row_projects_reference_and_defect() {
         let row = || Count::from_u64(u64::MAX);
-        let encoded = |wanted: &str, defect: FOValue| {
+        let encoded = |defect: FOValue| {
             tag(
                 "unresolved-row",
                 Some(FOValue::Map {
-                    entries: vec![
-                        ("defect".into(), defect),
-                        ("row".into(), row().encode()),
-                        ("wanted".into(), tag(wanted, None)),
-                    ],
+                    entries: vec![("defect".into(), defect), ("row".into(), row().encode())],
                 }),
             )
         };
         let cases = [
             (
-                RowKind::Environment,
                 RowDefect::Forward(Count::from_u64(3)),
-                encoded(
-                    "environment",
-                    tag("forward", Some(Count::from_u64(3).encode())),
-                ),
-                "names row 18446744073709551615 as an environment, but rows are read in order and only the 3 rows before it can be named; that row comes later",
+                encoded(tag("forward", Some(Count::from_u64(3).encode()))),
+                "names environment row 18446744073709551615, but rows are read in order and only the 3 rows before it can be named; that row comes later",
             ),
             (
-                RowKind::Built,
                 RowDefect::Absent(Count::from_u64(1)),
-                encoded("built", tag("absent", Some(Count::from_u64(1).encode()))),
-                "names row 18446744073709551615 as a built list or map, but the image holds only 1 row",
-            ),
-            (
-                RowKind::Environment,
-                RowDefect::WrongKind(RowKind::Built),
-                encoded("environment", tag("wrong-kind", Some(tag("built", None)))),
-                "names row 18446744073709551615 as an environment, but that row is a built list or map",
+                encoded(tag("absent", Some(Count::from_u64(1).encode()))),
+                "names environment row 18446744073709551615, but the image holds only 1 row",
             ),
         ];
-        for (wanted, defect, expected, description) in cases {
+        for (defect, expected, description) in cases {
             check_projection(
-                &DecodeCause::UnresolvedRow(UnresolvedRow {
-                    row: row(),
-                    wanted,
-                    defect,
-                }),
+                &DecodeCause::UnresolvedRow(UnresolvedRow { row: row(), defect }),
                 &expected,
                 description,
             );

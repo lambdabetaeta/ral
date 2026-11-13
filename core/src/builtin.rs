@@ -15,10 +15,9 @@
 //! `BuiltinBody` has no bodiless variant, so every entry has a live body.
 
 use crate::fact::{InvariantFailure, Reason, ResidualDefect};
-use crate::ir::{Comp, CompKind, Name, synthetic};
-use crate::shell::runtime::{Env, Settled};
+use crate::ir::{Comp, CompKind, Env, Name, ValClos, View, synthetic};
+use crate::shell::runtime::Settled;
 use crate::shell::runtime::{Error, Mooring, Shell};
-use crate::shell::runtime::{ValClos, View};
 use crate::source::Spanned;
 use crate::ty::Site;
 use crate::typecheck::builtins::{
@@ -328,7 +327,7 @@ mod tests {
 
     #[test]
     fn residual_requires_exactly_this_builtin_and_the_supplied_prefix() {
-        use crate::shell::runtime::Binding;
+        use crate::ir::Binding;
 
         let shell = crate::test_helper::core_shell();
         let entry = Arc::new(shell.lookup_builtin("has").unwrap());

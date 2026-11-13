@@ -4,7 +4,8 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::shell::runtime::{Binding, Env, FrameHandle, HandlerEntry, Settled, ValClos};
+use crate::ir::{Binding, Env, ValClos};
+use crate::shell::runtime::{FrameHandle, HandlerEntry, Settled};
 use crate::ty::Closed;
 
 impl Shell {

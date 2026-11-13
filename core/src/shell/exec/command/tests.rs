@@ -1467,7 +1467,8 @@ mod process {
         use crate::io::child::Connection;
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
-        use crate::shell::runtime::{Mooring, Shell, ValClos};
+        use crate::ir::ValClos;
+        use crate::shell::runtime::{Mooring, Shell};
         use std::os::unix::fs::{PermissionsExt, symlink};
         use std::path::{Path, PathBuf};
 

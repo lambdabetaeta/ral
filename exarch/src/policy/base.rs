@@ -411,7 +411,7 @@ mod tests {
     /// The selector names `text`'s `exec` allow list targets as `` `dir `NAME ``,
     /// read from the evaluated profile before it is decoded and frozen.
     fn dir_selectors(text: &str) -> std::collections::BTreeSet<String> {
-        use ral_core::shell::runtime::{ValClos, View};
+        use ral_core::{VClosRef, View};
         let mut shell = ral_core::test_helper::core_shell();
         let profile = ral_core::shell::load::evaluate_closed(
             &ral_core::shell::runtime::Mooring::adrift(),
@@ -421,12 +421,14 @@ mod tests {
             None,
         )
         .unwrap_or_else(|e| panic!("profile failed to evaluate: {e:?}"));
-        let field = |v: &ValClos, k: &str| match v.view() {
-            View::Map(m) => m.get(k).map(std::borrow::Cow::into_owned),
-            _ => None,
-        };
-        let allow = field(&profile, "exec")
-            .and_then(|exec| field(&exec, "allow"))
+        fn field<'a>(v: VClosRef<'a>, k: &str) -> Option<VClosRef<'a>> {
+            match v.view() {
+                View::Map(m) => m.get(k),
+                _ => None,
+            }
+        }
+        let allow = field(VClosRef::from(&profile), "exec")
+            .and_then(|exec| field(exec, "allow"))
             .expect("the profile has an exec allow list");
         let View::List(targets) = allow.view() else {
             panic!("exec allow is a list");
@@ -434,16 +436,11 @@ mod tests {
         targets
             .iter()
             .filter_map(|t| match t.view() {
-                View::Variant { label, payload } if &**label == "dir" => {
-                    payload.map(std::borrow::Cow::into_owned)
-                }
+                View::Variant { label, payload } if &**label == "dir" => Some(payload),
                 _ => None,
             })
             .filter_map(|inner| match inner.view() {
-                View::Variant {
-                    label,
-                    payload: None,
-                } => Some(label.to_string()),
+                View::Variant { label, payload } if payload.is_unit() => Some(label.to_string()),
                 _ => None,
             })
             .collect()

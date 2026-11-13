@@ -23,7 +23,7 @@ use ral_core::ty::{
     Binders, CompTy, Grade, Kind, Ty, Typed, closed_record, closed_variant, open_record,
 };
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{Shell, ValClos, View};
+use ral_core::{Shell, VClosRef, ValClos, View};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -80,7 +80,7 @@ fn invalid(operation: &str, path: Vec<DataStep>, cause: InvalidCause) -> Error {
     })))
 }
 
-fn shape(operation: &str, path: Vec<DataStep>, value: &ValClos, expected: Expected) -> Error {
+fn shape(operation: &str, path: Vec<DataStep>, value: VClosRef<'_>, expected: Expected) -> Error {
     invalid(
         operation,
         path,
@@ -104,33 +104,25 @@ fn set_op(arg: &ValClos) -> Settled<EditorOp> {
             ));
         };
         match value.view() {
-            View::Variant {
-                label,
-                payload: None,
-            } if &**label == "keep" => Ok(None),
-            View::Variant {
-                label,
-                payload: Some(v),
-            } if &**label == "set" => Ok(Some(v.into_owned())),
-            View::Variant {
-                label,
-                payload: Some(v),
-            } if &**label == "keep" => Err(invalid(
-                "_ed-set",
-                path,
-                InvalidCause::UnexpectedPayload(UnexpectedPayload {
-                    tag: label.to_string(),
-                    found: v.found(),
-                }),
-            )),
-            View::Variant {
-                label,
-                payload: None,
-            } if &**label == "set" => Err(invalid(
-                "_ed-set",
-                path,
-                InvalidCause::MissingPayload(label.to_string()),
-            )),
+            View::Variant { label, payload } if &**label == "keep" => match payload.view() {
+                View::Unit => Ok(None),
+                _ => Err(invalid(
+                    "_ed-set",
+                    path,
+                    InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                        tag: label.to_string(),
+                        found: payload.found(),
+                    }),
+                )),
+            },
+            View::Variant { label, payload } if &**label == "set" => match payload.view() {
+                View::Unit => Err(invalid(
+                    "_ed-set",
+                    path,
+                    InvalidCause::MissingPayload(label.to_string()),
+                )),
+                _ => Ok(Some(payload)),
+            },
             View::Variant { label, .. } => Err(invalid(
                 "_ed-set",
                 path,
@@ -142,7 +134,7 @@ fn set_op(arg: &ValClos) -> Settled<EditorOp> {
             _ => Err(shape(
                 "_ed-set",
                 path,
-                &value,
+                value,
                 Expected::Tags(vec!["keep".into(), "set".into()]),
             )),
         }
@@ -156,7 +148,7 @@ fn set_op(arg: &ValClos) -> Settled<EditorOp> {
                     DataStep::Field("text".into()),
                     DataStep::Payload("set".into()),
                 ],
-                &v,
+                v,
                 Expected::Shape(ValueShape::String),
             )),
         })
@@ -170,7 +162,7 @@ fn set_op(arg: &ValClos) -> Settled<EditorOp> {
                     DataStep::Field("cursor".into()),
                     DataStep::Payload("set".into()),
                 ],
-                &v,
+                v,
                 Expected::Shape(ValueShape::Int),
             )),
         })
@@ -302,7 +294,7 @@ pub fn builtin_ed_history(
             return Err(shape(
                 "_ed-history",
                 vec![DataStep::Index(1_usize.into())],
-                &args[1],
+                VClosRef::from(&args[1]),
                 Expected::Shape(ValueShape::Int),
             )
             .into());
@@ -404,14 +396,14 @@ pub fn builtin_ed_highlight(
         .as_list("_ed-highlight")?
         .iter()
         .enumerate()
-        .map(|(index, v)| highlight_req(index, &v))
+        .map(|(index, v)| highlight_req(index, v))
         .collect::<Settled<_>>()?;
     ask(shell, mooring, "_ed-highlight", EditorOp::Highlight(spans))
 }
 
 /// One `_ed-highlight` span: row-polymorphic, its style checked here.
-fn highlight_req(index: usize, v: &ValClos) -> Settled<HighlightReq> {
-    let int_field = |v: &ValClos, field: &'static str| match v.view() {
+fn highlight_req(index: usize, v: VClosRef<'_>) -> Settled<HighlightReq> {
+    let int_field = |v: VClosRef<'_>, field: &'static str| match v.view() {
         View::Int(n) => Ok(offset(n)),
         _ => Err(shape(
             "_ed-highlight",
@@ -434,10 +426,10 @@ fn highlight_req(index: usize, v: &ValClos) -> Settled<HighlightReq> {
         end: 0,
         style: String::new(),
     };
-    for (k, v) in m {
+    for (k, v) in m.iter() {
         match k {
-            "start" => span.start = int_field(&v, "start")?,
-            "end" => span.end = int_field(&v, "end")?,
+            "start" => span.start = int_field(v, "start")?,
+            "end" => span.end = int_field(v, "end")?,
             "style" => span.style = v.to_string(),
             _ => {}
         }
@@ -798,7 +790,7 @@ mod tests {
         let value = result.expect("_ed-tui reports rather than raises");
         let m = value.as_map("_ed-tui").expect("a result record");
         assert!(matches!(
-            m.get("status").as_deref().map(ValClos::view),
+            m.get("status").map(VClosRef::view),
             Some(View::Int(1))
         ));
         assert_eq!(asked, 0);
@@ -914,7 +906,7 @@ mod tests {
             })
         );
         let span = ValClos::map(vec![("end".into(), ValClos::bool(false))]);
-        let Err(Break::Error(error)) = highlight_req(2, &span) else {
+        let Err(Break::Error(error)) = highlight_req(2, VClosRef::from(&span)) else {
             panic!("expected invalid end")
         };
         let Reason::Invalid(failure) = error.reason else {

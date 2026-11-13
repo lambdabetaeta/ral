@@ -2,7 +2,7 @@
 //! and what a `race` returns.
 
 use crate::common::must_succeed;
-use ral_core::shell::runtime::{ValClos, View};
+use ral_core::{VClosRef, ValClos, View};
 
 /// `$upper` is a plain env hit on the native — the entry *is* the value.
 #[test]
@@ -32,10 +32,7 @@ fn list_position_deref_gives_thunk() {
     match v.view() {
         View::List(items) => {
             assert!(
-                matches!(
-                    items.get(0).as_deref().map(ValClos::view),
-                    Some(View::Thunk { .. })
-                ),
+                matches!(items.get(0).map(VClosRef::view), Some(View::Thunk { .. })),
                 "expected thunk, got {:?}",
                 items.get(0)
             );

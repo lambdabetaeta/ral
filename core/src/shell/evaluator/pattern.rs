@@ -5,8 +5,8 @@
 use crate::fact::{
     CountRule, EvalFailure, Expected, KeyOrField, MissingEntry, PatternLength, Reason, ValueShape,
 };
-use crate::ir::{Name, Pattern};
-use crate::shell::runtime::{Binding, Env, Error, Settled, ValClos, View};
+use crate::ir::{Binding, Env, Name, Pattern, VClosRef, ValClos, View};
+use crate::shell::runtime::{Error, Settled};
 
 /// The `(name, value)` pairs `pattern` binds in `value`, in pattern order.
 ///
@@ -14,7 +14,7 @@ use crate::shell::runtime::{Binding, Env, Error, Settled, ValClos, View};
 /// The shape mismatches [`stage`] reports.
 pub(crate) fn destructure(pattern: &Pattern, value: &ValClos) -> Settled<Vec<(Name, ValClos)>> {
     let mut staged = Vec::new();
-    stage(pattern, value, &mut staged)?;
+    stage(pattern, value.into(), &mut staged)?;
     Ok(staged)
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn bind(pattern: &Pattern, value: &ValClos, mut env: Env) -> Settled<
 }
 
 /// Recursive worker for [`destructure`]: pushes each binding onto `staged`.
-fn stage(pattern: &Pattern, value: &ValClos, staged: &mut Vec<(Name, ValClos)>) -> Settled<()> {
+fn stage(pattern: &Pattern, value: VClosRef<'_>, staged: &mut Vec<(Name, ValClos)>) -> Settled<()> {
     match pattern {
         Pattern::Wildcard => Ok(()),
         Pattern::Name(name) => {
@@ -48,7 +48,7 @@ fn stage(pattern: &Pattern, value: &ValClos, staged: &mut Vec<(Name, ValClos)>) 
                 crate::syntax::ast::WordLiteral::classify(name).is_none(),
                 "parser guarantees a binding name is never a word literal",
             );
-            staged.push((name.clone(), value.clone()));
+            staged.push((name.clone(), value.into_owned()));
             Ok(())
         }
         Pattern::List { elems, rest } => {
@@ -70,13 +70,10 @@ fn stage(pattern: &Pattern, value: &ValClos, staged: &mut Vec<(Name, ValClos)>) 
                 let item = items
                     .get(i)
                     .expect("checked above: elems.len() <= items.len()");
-                stage(pat, &item, staged)?;
+                stage(pat, item, staged)?;
             }
             if let Some(name) = rest {
-                // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
-                let mut whole = items.to_list();
-                let tail = whole.split_off(elems.len());
-                staged.push((name.clone(), tail.into()));
+                staged.push((name.clone(), items.suffix(elems.len())));
             }
             Ok(())
         }
@@ -98,7 +95,7 @@ fn stage(pattern: &Pattern, value: &ValClos, staged: &mut Vec<(Name, ValClos)>) 
                     )))
                     .into());
                 };
-                stage(&entry.pattern, &val, staged)?;
+                stage(&entry.pattern, val, staged)?;
             }
             Ok(())
         }

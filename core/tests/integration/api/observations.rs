@@ -24,7 +24,7 @@
 
 use crate::common::prelude;
 #[cfg(unix)]
-use crate::common::{check_fields, commands, facts, run_recorded, under_grant};
+use crate::common::{check_fields, commands, facts, field, run_recorded, under_grant};
 
 use ral_core::data::FOValue;
 use ral_core::data::datum::untag;
@@ -32,13 +32,13 @@ use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::{HostSurface, boot_shell};
 use ral_core::shell::run::RunRequest;
-#[cfg(unix)]
-use ral_core::shell::runtime::{Map, View};
-use ral_core::shell::runtime::{Observation, Settled, Shell, ValClos};
+use ral_core::shell::runtime::{Observation, Settled, Shell};
 use ral_core::source::SourceOrigin;
 #[cfg(unix)]
 use ral_core::test_helper::fresh_shell;
-use ral_core::{EventSink, SurfaceSink};
+use ral_core::{EventSink, SurfaceSink, ValClos};
+#[cfg(unix)]
+use ral_core::{VClosRef, View};
 use std::sync::{Arc, Mutex};
 
 /// A shell booted the way a host with a rail boots one: core's surface plus
@@ -145,29 +145,14 @@ fn surface_forwards_the_event_to_the_sink() {
 /// so a test of one observation names the kind it is about rather than counting the whole
 /// stream.
 #[cfg(unix)]
-fn single_observation(events: &[ValClos], kind: &str) -> ral_core::shell::runtime::Map {
-    let facts: Vec<ral_core::shell::runtime::Map> = events
-        .iter()
-        .filter_map(|v| match v.view() {
-            View::Map(m) => match m.get("what").as_deref().map(ValClos::view) {
-                Some(View::Variant {
-                    label,
-                    payload: Some(fact),
-                }) if label.as_ref() == kind => match fact.view() {
-                    View::Map(fact) => Some(fact.to_map()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
+fn single_observation(events: &[ValClos], kind: &str) -> ValClos {
+    let mut facts = facts(events, kind);
     assert_eq!(
         facts.len(),
         1,
         "exactly one {kind} observation must fire, got {events:?}"
     );
-    facts.into_iter().next().expect("checked above")
+    facts.remove(0).0
 }
 
 /// [`run_recorded`] with the sink always installed: several I/O operations
@@ -200,11 +185,14 @@ fn external_success_emits_command_observation() {
 
     let m = single_observation(&events, "command");
     assert_eq!(
-        m.get("argv"),
-        Some(&ValClos::list(vec![s("/usr/bin/true")]))
+        field(&m, "argv"),
+        Some(ValClos::list(vec![s("/usr/bin/true")]))
     );
-    assert_eq!(m.get("origin"), Some(&ValClos::variant("external", None)));
-    assert_eq!(m.get("status"), Some(&ValClos::int(0)));
+    assert_eq!(
+        field(&m, "origin"),
+        Some(ValClos::variant("external", None))
+    );
+    assert_eq!(field(&m, "status"), Some(ValClos::int(0)));
 }
 
 // ── WRITE ────────────────────────────────────────────────────────────────
@@ -222,7 +210,7 @@ fn some(bytes: &[u8]) -> ValClos {
 /// script naming the directory, and return the directory with the one write
 /// observation.
 #[cfg(unix)]
-fn write_over(old: &[u8], script: &str) -> (tempfile::TempDir, ral_core::shell::runtime::Map) {
+fn write_over(old: &[u8], script: &str) -> (tempfile::TempDir, ValClos) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     std::fs::write(dir.join("f"), old).unwrap();
@@ -244,8 +232,8 @@ fn an_atomic_writes_after_image_is_read_from_the_staging_handle() {
         b"old\n",
         "/bin/sh -c 'cd {d}; echo wrote; for s in .ral-write-*; do rm $s; echo substitute > $s; done' > '{d}/f'",
     );
-    assert_eq!(m.get("new-bytes"), Some(&some(b"wrote\n")));
-    assert_eq!(m.get("old-bytes"), Some(&some(b"old\n")));
+    assert_eq!(field(&m, "new-bytes"), Some(some(b"wrote\n")));
+    assert_eq!(field(&m, "old-bytes"), Some(some(b"old\n")));
 }
 
 /// Both images of `>>` are read through the handle derived from the held
@@ -257,8 +245,8 @@ fn a_streaming_appends_images_are_read_from_the_derived_reader() {
         b"old\n",
         "/bin/sh -c 'echo new; echo other > {d}/g; mv {d}/g {d}/f' >> '{d}/f'",
     );
-    assert_eq!(m.get("old-bytes"), Some(&some(b"old\n")));
-    assert_eq!(m.get("new-bytes"), Some(&some(b"old\nnew\n")));
+    assert_eq!(field(&m, "old-bytes"), Some(some(b"old\n")));
+    assert_eq!(field(&m, "new-bytes"), Some(some(b"old\nnew\n")));
     let dir = tmp.path().canonicalize().unwrap();
     assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"other\n");
 }
@@ -285,7 +273,7 @@ fn a_write_to_an_unreadable_file_lands_with_no_before_image() {
     );
     result.expect("a 0200 file is writable");
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("old-bytes"), Some(&ValClos::variant("none", None)));
+    assert_eq!(field(&m, "old-bytes"), Some(ValClos::variant("none", None)));
     std::fs::set_permissions(&target, PermissionsExt::from_mode(0o600)).unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"new\n");
 }
@@ -326,7 +314,7 @@ fn run_fresh(source: &str, sink: bool) -> (Settled<ValClos>, Vec<ValClos>) {
 }
 
 #[cfg(unix)]
-fn command_facts(observations: &[ValClos]) -> Vec<Map> {
+fn command_facts(observations: &[ValClos]) -> Vec<ValClos> {
     facts(observations, "command")
         .into_iter()
         .map(|(fact, _)| fact)
@@ -337,22 +325,22 @@ fn command_facts(observations: &[ValClos]) -> Vec<Map> {
 /// would have received.
 #[cfg(unix)]
 fn trail_of(report: &ValClos) -> Vec<ValClos> {
-    let View::Map(report) = report.view() else {
-        panic!("audit returns a record, got {report:?}");
+    let Some(trail) = field(report, "trail") else {
+        panic!("audit returns a record with a trail, got {report:?}");
     };
-    match report.get("trail").as_deref().map(ValClos::view) {
-        Some(View::List(items)) => items.iter().map(std::borrow::Cow::into_owned).collect(),
+    match trail.view() {
+        View::List(items) => items.iter().map(VClosRef::into_owned).collect(),
         other => panic!("audit's report carries a trail list, got {other:?}"),
     }
 }
 
 /// The three fields a reader of a command fact judges it by.
 #[cfg(unix)]
-fn shape(fact: &Map) -> (Option<ValClos>, Option<ValClos>, Option<ValClos>) {
+fn shape(fact: &ValClos) -> (Option<ValClos>, Option<ValClos>, Option<ValClos>) {
     (
-        fact.get("argv").cloned(),
-        fact.get("origin").cloned(),
-        fact.get("status").cloned(),
+        field(fact, "argv"),
+        field(fact, "origin"),
+        field(fact, "status"),
     )
 }
 
@@ -471,7 +459,7 @@ fn a_refused_stage_reports_the_same_check_as_a_refused_standalone_run() {
         staged, alone,
         "a direct stage's refusal must be the standalone's"
     );
-    assert!(check_fields(&alone[0].0).get("args").is_none());
+    assert!(field(&check_fields(&alone[0].0), "args").is_none());
 }
 
 /// A direct stage that `prepare`'s vetting refuses never spawned, and still

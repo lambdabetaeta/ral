@@ -2,8 +2,9 @@
 
 use crate::authority::policy::{Flag, ShellVerb};
 use crate::fact::{Expected, InvalidCause, ValueShape};
+use crate::ir::{ValClos, View};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Settled, Shell, ValClos, View};
+use crate::shell::runtime::{Settled, Shell};
 
 /// `cd <path>` — move the shell's logical cwd, never the OS process cwd.
 pub(super) fn builtin_chdir(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {

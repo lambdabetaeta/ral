@@ -143,20 +143,17 @@ pub(crate) fn every_variant() -> Vec<Arc<Comp>> {
         release: var("r_guard_release"),
     });
     let scope_within = Spanned::synthetic(CompKind::Within {
-        opts: Node::new(
-            vec![
-                ("dir".into(), svar("r_within_opts")),
-                (
-                    "handlers".into(),
-                    Spanned::synthetic(Val::map(vec![("deploy".into(), svar("r_within_arm"))])),
-                ),
-            ]
-            .into(),
-        ),
+        opts: fields(vec![
+            ("dir", svar("r_within_opts")),
+            (
+                "handlers",
+                Spanned::synthetic(Val::map(vec![("deploy".into(), svar("r_within_arm"))])),
+            ),
+        ]),
         body: var("r_within_body"),
     });
     let scope_grant = Spanned::synthetic(CompKind::Grant {
-        caps: Node::new(vec![("net".into(), svar("r_grant_caps"))].into()),
+        caps: fields(vec![("net", svar("r_grant_caps"))]),
         body: var("r_grant_body"),
     });
     let scope_audit = Spanned::synthetic(CompKind::Audit {
@@ -403,6 +400,15 @@ fn occ_is_sorted_distinct_and_includes_nested_nodes() {
     assert_eq!(occ, ["a", "b", "c"]);
 }
 
+fn fields(entries: Vec<(&str, Spanned<Val>)>) -> Arc<FieldsNode> {
+    FieldsNode::new(
+        entries
+            .into_iter()
+            .map(|(key, value)| (Name::from(key), value))
+            .collect(),
+    )
+}
+
 /// A list node serialises to its shape alone, and decodes with the same
 /// occ it was built with.
 #[test]
@@ -414,6 +420,25 @@ fn a_node_crosses_the_wire_as_its_shape() {
 
     let decoded: Arc<ListNode> = serde_json::from_str(&wire).expect("deserialize node");
     assert_eq!(decoded.occ(), node.occ());
+}
+
+/// Fields cross the wire as a sequence of pairs, ascending by key.
+#[test]
+fn fields_cross_the_wire_as_ordered_pairs() {
+    let entries = vec![("b", svar("y")), ("a", svar("x"))];
+    for node in [Val::Record, Val::Map] {
+        let val = node(fields(entries.clone()));
+        let wire = serde_json::to_value(&val).expect("serialize fields");
+        let (_, pairs) = wire.as_object().unwrap().iter().next().unwrap();
+        let keys: Vec<_> = pairs
+            .as_array()
+            .expect("pairs")
+            .iter()
+            .map(|p| &p[0])
+            .collect();
+        assert_eq!(keys, ["a", "b"]);
+        assert_eq!(serde_json::from_value::<Val>(wire).expect("decode"), val);
+    }
 }
 
 // ── Argv, Toplevel, Pattern, Redirects ───────────────────────────────

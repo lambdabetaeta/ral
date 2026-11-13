@@ -26,13 +26,13 @@ use crate::authority::sandbox::{ExecProjection, SandboxProjection};
 use crate::builtin::BuiltinEntry;
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::data::FOValue;
-use crate::ir::{CaseArm, Comp, CompKind, Exec, Val};
+use crate::ir::{Binding, CaseArm, Comp, CompKind, Exec, Val, ValClos};
 #[cfg(unix)]
 use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
-use crate::shell::runtime::{Binding, Mooring, Settled, Shell, ValClos};
+use crate::shell::runtime::{Mooring, Settled, Shell};
 use crate::ty::{Closed, Scheme, Ty, Var};
 use crate::typecheck::Unifier;
 use std::sync::Arc;

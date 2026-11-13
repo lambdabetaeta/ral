@@ -44,7 +44,8 @@ mod tests {
     };
     use crate::io::Retained;
     use crate::ir::WriteMode;
-    use crate::shell::runtime::{Map, ValClos, View, WorkerId};
+    use crate::ir::{ValClos, View};
+    use crate::shell::runtime::WorkerId;
     use std::collections::BTreeMap;
 
     fn site() -> CallSite {
@@ -182,22 +183,19 @@ mod tests {
     }
 
     /// The tag and the record behind it, out of an encoding's `what`.
-    fn fact_of(v: &ValClos) -> (String, Map) {
+    fn fact_of(v: &ValClos) -> (String, ValClos) {
         let View::Map(m) = v.view() else {
             panic!("an observation encodes as a record")
         };
         let what = m.get("what").expect("an observation has a `what` field");
-        let View::Variant {
-            label,
-            payload: Some(fact),
-        } = what.view()
-        else {
+        let View::Variant { label, payload } = what.view() else {
             panic!("`what` is a tagged fact")
         };
-        let View::Map(fact) = fact.view() else {
-            panic!("a fact encodes as a record")
-        };
-        (label.to_string(), fact.to_map())
+        assert!(
+            matches!(payload.view(), View::Map(_)),
+            "a fact encodes as a record"
+        );
+        (label.to_string(), payload.into_owned())
     }
 
     #[test]
@@ -251,12 +249,15 @@ mod tests {
         });
         let obs = Observation::instant(site(), None, what.clone());
         let (_, fact) = fact_of(&ValClos::from(obs.encode()));
+        let fact = fact.as_map("test").expect("a record");
+        let known_empty = ValClos::variant("some", Some(ValClos::bytes(Vec::new())));
+        let unknown = ValClos::variant("none", None);
         assert_eq!(
             fact.get("new-bytes"),
-            Some(&ValClos::variant("some", Some(ValClos::bytes(Vec::new())))),
+            Some((&known_empty).into()),
             "an empty new side is known, and known-empty"
         );
-        assert_eq!(fact.get("old-bytes"), Some(&ValClos::variant("none", None)));
+        assert_eq!(fact.get("old-bytes"), Some((&unknown).into()));
         round_trips(what);
     }
 

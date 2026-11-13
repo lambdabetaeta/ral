@@ -1,8 +1,6 @@
 //! [`Env`], the finite map a value closure captures.
 
-use crate::ir::{Name, Occ};
-use crate::shell::runtime::ValClos;
-use crate::shell::runtime::signature::Signature;
+use crate::ir::{Name, Occ, Val, ValClos, synthetic};
 use crate::ty::Closed;
 use either::Either;
 use rustc_hash::FxBuildHasher;
@@ -46,7 +44,7 @@ fn small_or_large(entries: Vec<(Name, Binding)>) -> Entries {
     }
 }
 
-/// ρ alone; [`super::signature::lookup`] adds Σ's fallback.
+/// ρ alone; Σ's fallback is `shell::runtime::lookup`.
 #[derive(Debug, Clone)]
 pub struct Env(Entries);
 const _: () = assert!(std::mem::size_of::<Env>() <= 16, "Env must fit in 16 bytes");
@@ -177,6 +175,29 @@ impl Env {
             }
         }
     }
+    /// `value` as an element of syntax closed over `self`: an atom is inlined;
+    /// anything else is bound here under a fresh name.
+    pub(crate) fn place(&mut self, value: ValClos) -> Val {
+        value.into_inline().unwrap_or_else(|value| {
+            let name = self.fresh_item();
+            self.bind(
+                name.clone(),
+                Binding {
+                    value,
+                    scheme: None,
+                },
+            );
+            Val::Variable(name)
+        })
+    }
+    /// The first `%itemK`, K ≥ |ρ|, that ρ does not bind. At most |ρ| of the
+    /// candidates are bound, so the search ends within |ρ| + 1 steps.
+    fn fresh_item(&self) -> Name {
+        (self.len()..=2 * self.len())
+            .map(|k| synthetic("item", k))
+            .find(|name| self.binding(name).is_none())
+            .expect("|ρ| + 1 candidates, at most |ρ| of them bound")
+    }
     /// Restriction is the identity when it drops no binding.
     pub(crate) fn restrict(&self, occ: &Occ) -> Self {
         if occ.len() >= self.len() && self.names().all(|name| occ.contains(name)) {
@@ -199,7 +220,7 @@ impl Env {
             Either::Right(entries) => Either::Right(entries.iter()),
         }
     }
-    #[cfg(test)]
+    /// Whether both are one allocation (or both ∅).
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Entries::Empty, Entries::Empty) => true,
@@ -209,47 +230,6 @@ impl Env {
             (Entries::Large(a), Entries::Large(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
-    }
-    /// ρ then Σ's prelude, projecting each name on first sight.
-    pub(crate) fn fold_union<T>(
-        &self,
-        sig: &Signature,
-        project: impl Fn(&Binding) -> T,
-    ) -> Vec<(String, T)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::with_capacity(self.len());
-        for (k, b) in self.iter() {
-            seen.insert(k.as_ref());
-            result.push((k.to_string(), project(b)));
-        }
-        for name in sig.prelude_names() {
-            if !seen.contains(name)
-                && let Some(b) = sig.prelude_binding(name)
-            {
-                result.push((name.to_string(), project(b)));
-            }
-        }
-        result
-    }
-    pub(crate) fn largest_shallow_size(&self, sig: &Signature) -> usize {
-        let session = self.iter().map(|(_, b)| b.value.shallow_size());
-        let prelude = sig
-            .prelude_names()
-            .filter(|name| self.binding(name).is_none())
-            .filter_map(|name| sig.prelude_binding(name))
-            .map(|b| b.value.shallow_size());
-        session.chain(prelude).max().unwrap_or(0)
-    }
-    pub(crate) fn all_bindings(&self, sig: &Signature) -> Vec<(String, ValClos)> {
-        self.fold_union(sig, |b| b.value.clone())
-    }
-    pub(crate) fn distinct_name_count(&self, sig: &Signature) -> usize {
-        let mut seen: std::collections::HashSet<&str> = self.names().map(AsRef::as_ref).collect();
-        seen.extend(sig.prelude_names());
-        seen.len()
-    }
-    pub(crate) fn binding_schemes(&self, sig: &Signature) -> Vec<(String, Option<Closed>)> {
-        self.fold_union(sig, |b| b.scheme.clone())
     }
 }
 impl Default for Env {
@@ -332,36 +312,11 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                drop(crate::shell::runtime::deep_block_chain(
-                    100_000,
-                    ValClos::UNIT,
-                ));
+                drop(crate::ir::deep_block_chain(100_000, ValClos::UNIT));
             })
             .expect("spawn")
             .join()
             .expect("a deep chain drops without exhausting the stack");
-    }
-    #[test]
-    fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
-        let mut sig = Signature::default();
-        sig.install_prelude(Arc::new(
-            std::iter::once(("map".to_string(), binding(ValClos::string("prelude-map")))).collect(),
-        ));
-        let mut env = Env::EMPTY;
-        assert_eq!(
-            crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&ValClos::string("prelude-map"))
-        );
-        env.bind("map".into(), binding(ValClos::int(3)));
-        assert_eq!(
-            crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&ValClos::int(3))
-        );
-        env.unset("map");
-        assert_eq!(
-            crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&ValClos::string("prelude-map"))
-        );
     }
     #[test]
     fn small_and_large_agree() {
@@ -407,5 +362,57 @@ mod tests {
         assert!(empty.ptr_eq(&Env::EMPTY));
         assert!(matches!(empty.0, Entries::Empty));
         assert!(!narrowed.names().any(|n| n.as_ref() == "map"));
+    }
+    #[test]
+    fn placing_inlines_atoms_and_binds_everything_else_under_fresh_names() {
+        let mut env = Env::EMPTY;
+        for atom in [
+            ValClos::UNIT,
+            ValClos::bool(true),
+            ValClos::int(1),
+            ValClos::string("s"),
+            ValClos::bytes(b"b".to_vec()),
+        ] {
+            assert!(!matches!(env.place(atom), Val::Variable(_)));
+        }
+        assert!(env.is_empty());
+        let closed_list = ValClos::list(vec![]);
+        let closed_map = ValClos::map(vec![]);
+        let tagged = ValClos::variant("t", None);
+        let block = crate::ir::block_over(&Env::EMPTY);
+        let handle = ValClos::withheld("h");
+        for (i, value) in [closed_list, closed_map, tagged, block, handle]
+            .into_iter()
+            .enumerate()
+        {
+            let Val::Variable(name) = env.place(value) else {
+                panic!("only atoms are inlined")
+            };
+            assert_eq!(name.as_ref(), format!("%item{i}"));
+            assert!(env.binding(&name).is_some());
+        }
+    }
+    #[test]
+    fn a_fresh_name_skips_the_ones_in_use() {
+        let mut env = env_of([("%item1", 0), ("%item2", 0)]);
+        let Val::Variable(name) = env.place(ValClos::withheld("h")) else {
+            panic!("a handle is bound")
+        };
+        assert_eq!(name.as_ref(), "%item3");
+        assert_eq!(env.len(), 3);
+    }
+    #[test]
+    fn binding_into_a_large_env_leaves_the_original_untouched() {
+        let large = Env::from_bindings(
+            (0..=SMALL * 4)
+                .map(|index| (format!("key{index:02}").into(), binding(ValClos::UNIT)))
+                .collect(),
+        )
+        .unwrap();
+        let mut grown = large.clone();
+        grown.bind("extra".into(), binding(ValClos::int(1)));
+        assert_eq!(grown.len(), large.len() + 1);
+        assert!(large.binding("extra").is_none());
+        assert!(grown.binding("key00").is_some());
     }
 }

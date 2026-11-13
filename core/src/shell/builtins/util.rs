@@ -7,7 +7,8 @@ use crate::fact::{
     ValueShape,
 };
 use crate::io::Source;
-use crate::shell::runtime::{Settled, Shell, ValClos, View};
+use crate::ir::{ValClos, View};
+use crate::shell::runtime::{Settled, Shell};
 
 /// Bytes written by number, one `Int` per byte — [`ValClos::as_bytes`] is the
 /// other spelling, for a `Bytes` value already in hand.

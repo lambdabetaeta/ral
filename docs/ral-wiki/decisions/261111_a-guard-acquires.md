@@ -79,7 +79,7 @@ change it. In particular,
 > checked rule's acquire is `U (F^p R)`, not `U (F^ν R)` with ν free. A free
 > ν bound a `w` producer's `()` where `let` would have captured its output.
 > The checker shares `Solver::binding`; readback wraps a captured acquire as
-> `{ capture (force A) }`. `Ral/` Agda and the paper carry `F p R`.
+> `{ capture (force A) }`. `dev/agda/Intrinsic/` and the paper carry `F p R`.
 
 ## D5: bounds and evidence
 

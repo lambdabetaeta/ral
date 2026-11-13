@@ -12,8 +12,8 @@
 //! that must change.
 
 use crate::handle::pins_live_work;
+use crate::ir::Env;
 use crate::record;
-use crate::shell::runtime::Env;
 use std::collections::{HashMap, HashSet};
 
 /// Host-stated per-agent policy.
@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 ///
 /// `large_binding_bytes` is an orthogonal axis — residency, not lifetime:
 /// an install whose
-/// [`ValClos::shallow_size`](crate::shell::runtime::ValClos::shallow_size) estimate meets
+/// [`ValClos::shallow_size`](crate::ValClos::shallow_size) estimate meets
 /// it queues a [`LargeBindingNotice`], however fresh the name.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BindingLease {
@@ -227,7 +227,7 @@ impl BindingLedger {
                 // Orphaned by a rollback: nothing to prune.
                 None => self.drop_entry(&name),
                 // Pinned: leave the entry exactly as it is.
-                Some(value) if pins_live_work(value) => {}
+                Some(value) if pins_live_work(value.into()) => {}
                 Some(value) => {
                     let kind = value.type_name().to_string();
                     env.unset(&name);
@@ -341,10 +341,11 @@ mod tests {
 mod chokepoint_tests {
     use crate::RunIo;
     use crate::handle::{Handle, Sample};
+    use crate::ir::{VClosRef, ValClos, View};
     use crate::protocol::{Program, Run};
     use crate::shell::boot::BakedPrelude;
     use crate::shell::run::RunReport;
-    use crate::shell::runtime::{Settled, Shell, ValClos, View};
+    use crate::shell::runtime::{Settled, Shell};
     use crate::source::SourceOrigin;
     use crate::test_helper::eventually;
     use std::time::Duration;
@@ -679,8 +680,8 @@ mod chokepoint_tests {
             panic!("use must return the module's exports");
         };
         assert_eq!(
-            exports.get("used_helper").as_deref(),
-            Some(&ValClos::int(7))
+            exports.get("used_helper").and_then(VClosRef::as_int),
+            Some(7)
         );
         assert_eq!(shell.scope_lookup("used_ref_x"), Some(&ValClos::int(1)));
         assert_eq!(epoch(&shell), epoch_before + 1, "use still ages leases");

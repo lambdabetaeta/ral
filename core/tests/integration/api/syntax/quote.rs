@@ -3,7 +3,7 @@
 use crate::common::top_level;
 use ral_core::test_access::binding_scheme;
 use ral_core::test_helper::fresh_shell;
-use ral_core::{ValClos, shell::runtime::View};
+use ral_core::{ValClos, View};
 
 #[test]
 fn ral_quote_roundtrips_strings_through_normal_evaluation() {

@@ -24,9 +24,10 @@
 use crate::common::under_grant;
 
 use ral_core::Settled;
+use ral_core::ValClos;
 use ral_core::protocol::Run;
 use ral_core::shell::run::{RunReport, StaticDiagnostics};
-use ral_core::shell::runtime::{Break, ValClos};
+use ral_core::shell::runtime::Break;
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::fresh_shell;
 

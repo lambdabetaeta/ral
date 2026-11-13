@@ -23,7 +23,8 @@
 
 use super::{BOUNDARY_BUILTINS, CORE_BUILTINS};
 use crate::Break;
-use crate::shell::runtime::{Mooring, ValClos, View};
+use crate::ir::{VClosRef, ValClos, View};
+use crate::shell::runtime::Mooring;
 use crate::test_helper::fresh_shell;
 use crate::ty::{CompTyNode, Grade, RowNode, Ty, TyNode};
 
@@ -77,10 +78,10 @@ fn inhabitant(ty: &Ty) -> Option<ValClos> {
 
 /// Does `value` inhabit the (resolved) declared return type?  A `Ty::Var`
 /// return is polymorphic — any value inhabits it.
-fn inhabits(value: &ValClos, ty: &Ty) -> bool {
+fn inhabits(value: VClosRef<'_>, ty: &Ty) -> bool {
     match (ty.node(), value.view()) {
-        (TyNode::List(elem), View::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
-        (TyNode::Map(val), View::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
+        (TyNode::List(elem), View::List(items)) => items.iter().all(|v| inhabits(v, elem)),
+        (TyNode::Map(val), View::Map(m)) => m.iter().all(|(_, v)| inhabits(v, val)),
         (TyNode::Var(_), _)
         | (TyNode::Unit, View::Unit)
         | (TyNode::Bool, View::Bool(_))
@@ -143,7 +144,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         let mut shell = fresh_shell();
         match entry.run(&args, &Mooring::adrift(), &mut shell) {
             Ok(result) => assert!(
-                inhabits(&result, &ret_ty),
+                inhabits(VClosRef::from(&result), &ret_ty),
                 "builtin `{name}` returned {result:?}, which does not inhabit its \
                  declared return type {ret_ty:?} (args: {args:?})"
             ),

@@ -3,7 +3,7 @@
 //! boot continues.
 
 use ral_core::path::shown;
-use ral_core::shell::runtime::{Break, Escape, Map, Mooring, Settled};
+use ral_core::shell::runtime::{Break, Escape, Mooring, Settled};
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::{Shell, ValClos, View, io::terminal};
 use std::path::Path;
@@ -52,7 +52,11 @@ fn source_rc(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<RcSettings, Stop> {
-    let plan = RcPlan::decode(&rc_config(path, text, mooring, shell)?, shell)
+    let rc = rc_config(path, text, mooring, shell)?;
+    let View::Map(pairs) = rc.view() else {
+        unreachable!("an rc ends in its keys written out (SPEC §15.3)")
+    };
+    let plan = RcPlan::decode(pairs, shell)
         .map_err(|msg| Stop::Failed(format!("{}: {msg}", shown(path))))?;
     plan.apply(mooring, shell).map_err(|b| match b {
         Break::Escape(Escape::Exit(code)) => Stop::Exit(code),
@@ -60,13 +64,14 @@ fn source_rc(
     })
 }
 
-fn rc_config(path: &Path, text: String, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {
+fn rc_config(
+    path: &Path,
+    text: String,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Result<ValClos, Stop> {
     let options = ral_core::typecheck::table::declared(ral_core::typecheck::Form::Rc);
-    let value = evaluate(path, text, Some(options), mooring, shell)?;
-    let View::Map(pairs) = value.view() else {
-        unreachable!("an rc ends in its keys written out (SPEC §15.3)")
-    };
-    Ok(pairs.to_map())
+    evaluate(path, text, Some(options), mooring, shell)
 }
 
 /// Evaluate one startup file against the live session and its tail's options
@@ -121,7 +126,7 @@ mod tests {
         .expect("a test host resolves its baseline")
     }
 
-    fn rc(src: &str) -> Result<Map, Stop> {
+    fn rc(src: &str) -> Result<ValClos, Stop> {
         let (_dir, path) = startup_file(src);
         rc_config(
             &path,

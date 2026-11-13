@@ -8,10 +8,9 @@ use ral_core::ir::Comp;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::{BakedPrelude, HostSurface, boot_runtime};
 use ral_core::shell::run::{RunReport, RunRequest};
-use ral_core::shell::runtime::{Map, Observation, Settled, Shell, ValClos, View};
+use ral_core::shell::runtime::{Observation, Settled, Shell};
 use ral_core::source::SourceOrigin;
-use ral_core::{EventSink, SurfaceSink};
-use std::borrow::Cow;
+use ral_core::{EventSink, SurfaceSink, VClosRef, ValClos, View};
 use std::sync::{Arc, Mutex};
 
 const HOST: &str = "a test host resolves its baseline";
@@ -201,23 +200,31 @@ pub fn run_recorded(
     (result, events)
 }
 
+/// The field `key` of the record or map `value`, owned; `None` when `value`
+/// is not a record or lacks the field.
+pub fn field(value: &ValClos, key: &str) -> Option<ValClos> {
+    match value.view() {
+        View::Map(m) => m.get(key).map(VClosRef::into_owned),
+        _ => None,
+    }
+}
+
 /// The `label` facts among a stream of observation records, in order, each
 /// with the site its observation carries.
-pub fn facts(observations: &[ValClos], label: &str) -> Vec<(Map, Option<ValClos>)> {
+pub fn facts(observations: &[ValClos], label: &str) -> Vec<(ValClos, Option<ValClos>)> {
     observations
         .iter()
-        .filter_map(|v| match v.view() {
-            View::Map(m) => match m.get("what").as_deref().map(ValClos::view) {
-                Some(View::Variant {
-                    label: kind,
-                    payload: Some(fact),
-                }) if kind.as_ref() == label => match fact.view() {
-                    View::Map(fact) => Some((fact.to_map(), m.get("site").map(Cow::into_owned))),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
+        .filter_map(|v| {
+            let what = field(v, "what")?;
+            let View::Variant {
+                label: kind,
+                payload: fact,
+            } = what.view()
+            else {
+                return None;
+            };
+            (kind.as_ref() == label && matches!(fact.view(), View::Map(_)))
+                .then(|| (fact.into_owned(), field(v, "site")))
         })
         .collect()
 }
@@ -237,9 +244,9 @@ pub fn commands(observations: &[ValClos]) -> Vec<ral_core::fact::Command> {
 }
 
 /// The `fields` of a check fact's payload, `{resource, decision, fields}`.
-pub fn check_fields(payload: &Map) -> Map {
-    match payload.get("fields").map(ValClos::view) {
-        Some(View::Map(fields)) => fields.to_map(),
+pub fn check_fields(payload: &ValClos) -> ValClos {
+    match field(payload, "fields") {
+        Some(fields) if matches!(fields.view(), View::Map(_)) => fields,
         other => panic!("a check fact carries a fields map, got {other:?}"),
     }
 }

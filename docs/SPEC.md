@@ -2054,14 +2054,14 @@ the failure at top level and use `exit n`.
 try { risky-work } { |e| raise $e }
 ```
 
-A record `try` handed over re-raises exactly: the failure keeps the cause it
-had, so its advice and its status are the original's. A record that is changed
-(`[...$e, status: 2]`), built by hand, or read back from data is the program's
-own claim instead. `raise` takes it as given, including its `frame` and `site`:
+A record is plain data, whatever its origin: handed over by `try`, changed
+(`[...$e, status: 2]`), built by hand, or read back from data. `raise` always
+takes it as the program's own claim, as given, including its `frame` and `site`:
 a claimed `[frame: f, message: m, status: 3, site: s]` is reported as that claim
-and exits 3 if unhandled. It refuses a `status` of 0 (use `return` for success)
-and one above 255. Records decoded from data must also match the closed type;
-extra fields are not accepted.
+and exits 3 if unhandled. The failure's original typed cause is not part of the
+record and is not restored. `raise` refuses a `status` of 0 (use `return` for
+success) and one above 255. Records decoded from data must also match the
+closed type; extra fields are not accepted.
 
 The signatures are:
 
@@ -2070,12 +2070,11 @@ fail  : ∀ε α. String → F^ε α
 raise : ∀ε α. ErrorRecord → F^ε α
 ```
 
-A re-raise of a caught record preserves its cause. Its advice is recomputed
-from it when the error is next rendered (§13.1), including the session's
-exit-hints lookup. Its resolved site renders as `script:line:col`, without a
-caret. Stored hints, context prefixes and unwind facts are report-only and do
-not survive a handler's re-raise. `await` propagates the live error instead,
-since no handler has intervened.
+A raised record is a claim: it has no typed cause, so it carries no intrinsic
+advice and no exit-hints entry. Its resolved site renders as `script:line:col`,
+without a caret. Stored hints, context prefixes and unwind facts are
+report-only and do not survive a handler. `await` propagates the live error
+instead, since no handler has intervened.
 
 An external command that exits unsuccessfully and a runtime operation that
 cannot complete also produce ordinary failures. They participate in `?` and
@@ -2142,7 +2141,7 @@ confinement itself, before the command could start, has status 1 and a message
 naming the failed step and its cause.
 
 Status codes are not unique failure classes: status 1 also covers operational
-refusal, even when `frame` is `grep`. This handler diagnoses and re-raises the
+refusal, even when `frame` is `grep`. This handler diagnoses and then raises the
 failure rather than assuming it means no matches:
 
 ```ral
@@ -2216,8 +2215,8 @@ The ending is the closed variant
 record of §8.6; `CancelCause` is the structured cause of §8.10, represented
 by the `Cause` variant in §11.4. The nullary `` `ok `` carries `()`, not the
 body's value. There is no `panic` arm: a panic runs no release frame. An `` `err ``
-carries the witnessed record, so `raise $e` in its arm re-raises the exact
-reason.
+carries the same record as `try`; `raise $e` in its arm raises it as a claim
+(§8.5).
 
 `guard` polls once before acquiring: a pending stop runs neither acquisition
 nor release. Acquisition is shielded, and its returned resource is placed in
@@ -3982,13 +3981,13 @@ the closed record `[frame: String, message: String, status: Int, site:
 [script: String, line: Int, col: Int]]` (§8.6), whose `message` and `status` are
 derived from the cause and never stored beside it, and which carries no output
 bytes. The cause is not language data: it stays typed through `try`, `poll`,
-`audit`, hosts and the wire, and re-raising a caught record restores it
-exactly (§8.5); none is reconstructed from diagnostic text. A runtime load's `compile` summary is intrinsic, while
+`audit`, hosts and the wire, and raising a record raises a claim, not that
+cause (§8.5); none is reconstructed from diagnostic text. A runtime load's `compile` summary is intrinsic, while
 its source-labelled compiler rejection remains report-only. A source rejected
 before evaluation is a static diagnostic, not a runtime failure.
 
-`fail` creates a fresh raised failure; `raise` re-raises a record; `$error[message]`
-is its description (§8.5):
+`fail` creates a fresh raised failure; `raise` raises a record as a claim;
+`$error[message]` is its description (§8.5):
 
 ```ral
 try {
@@ -4012,7 +4011,7 @@ signal advice and remedies for operational refusals. A process that `exited`
 also receives the session's matching exit-hints entry. Advice is recomputed
 at each render and is never stored in the record. Some host operations add
 situational advice from the cause and report-only context; that advice does
-not survive a handler's re-raise without that context.
+not survive a handler's `raise`.
 
 **Hint composition.** A refused capability's intrinsic advice precedes its stored
 hints. Other causes show stored hints, then any report-context advice, then
@@ -4023,8 +4022,7 @@ After them come one counted discard note, then an abandoned-tail note. Failed ca
 saturating at `u32::MAX`; written sequences and binds record whether later
 steps were abandoned. The abandoned-tail note is omitted for spawn failures
 and whenever any hint or advice is shown. Escapes carry no unwind facts.
-Re-raising a caught record drops these report-only facts; the advice is
-recomputed from its cause.
+Raising a record drops these report-only facts.
 
 Errors raised by the evaluator use the same path as explicit failures. For
 example, a map is indexed by a key computed at runtime, so a key the map does
@@ -4805,8 +4803,8 @@ and ends with one newline.
 fail 'unavailable'
 ```
 
-`raise $err` re-raises the closed `[frame, message, status, site]` record
-supplied by `try` (§8.5). `$err[message]` is its derived description (§8.6).
+`raise $err` raises the closed `[frame, message, status, site]` record
+supplied by `try` as the program's claim (§8.5). `$err[message]` is its derived description (§8.6).
 `exit` and `quit` leave the current program rather than producing a
 recoverable failure.
 
@@ -6811,8 +6809,8 @@ observations.
 
 `fail m` requires a `String` and raises a failure of message `m` and status 1
 at the innermost visible operation frame, including its own. `raise e` requires
-the closed error record: a caught record re-raises its exact cause; any other
-is the program's claim, raised as given (§8.5). `exit n` raises an exit escape and is not
+the closed error record, raised as the program's claim as given, whatever its
+origin (§8.5). `exit n` raises an exit escape and is not
 caught by `?` or `try`.
 
 Cancellation is polled at evaluator and process boundaries. A poll of a

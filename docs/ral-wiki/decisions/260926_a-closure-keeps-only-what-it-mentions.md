@@ -1,10 +1,10 @@
 ---
 status: accepted
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
-verified_at_commit: f9ac94f8
-verified_at_date: 2026-11-12
-anchors: [ValClos::close, ValClos::thunk, Env::restrict, Node::new, ListRef, MapRef]
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
+verified_at_commit: 9290eb03
+verified_at_date: 2026-11-13
+anchors: [ValClos::close, ValClos::thunk, Env::restrict, Node::new, Node::occ, ListRef, MapRef]
 amended_by:
   - "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
   - "[[261112_runtime-values-are-value-closures|runtime values are value closures]]"
@@ -12,17 +12,24 @@ amended_by:
 
 # A closure keeps only what it mentions
 
+> **Amended 2026-11-13:** a list's tail keeps its list's ρ, so `rest` in
+> `[x, ...rest]` holds the bindings of the elements it dropped until it dies.
+> This is the one exception to the law: restricting at every step would make a
+> loop over a list quadratic. A node built at run time computes its occurrence
+> set on first use, so only source literals pay for one at formation
+> ([[261112_runtime-values-are-value-closures|runtime values are value closures]]).
+
 > **Amended 2026-11-12 — Marshalling:**
 > [[design/engine-protocol|the engine protocol]]
-> writes each reached environment or built collection once, identified by
-> allocation, in dependencies-first rows. A closure retains its syntax and
-> row; shared captures and built data stay shared. This replaces the
+> writes each reached environment once, identified by allocation, in
+> dependencies-first rows. A closure retains its syntax and row; shared
+> captures stay shared. This replaces the
 > transfer scrub and quadratic root scan, not formation-time restriction.
 
 > **Amended 2026-11-12:**
 > [[261112_runtime-values-are-value-closures|runtime values are value closures]]
 > places restriction at value formation: `ValClos::thunk` and `ValClos::close`
-> use occurrence sets, cached by `Node::new` for node forms. Closing data
+> use occurrence sets, cached in each node. Closing data
 > additionally pulls every missing direct name's value from Σ into ρ;
 > names beneath a thunk still resolve ρ-then-Σ when it runs. Reading a
 > component V′ of ⟨V, ρ⟩ shares ρ without restriction or Σ lookup, so a
@@ -85,8 +92,8 @@ observable changes; what changes is *residency*: a closure formed after
   born into, so `spawn { explain x }` and `!{ explain x }` agree.
 - **Restriction and wire sharing are separate laws.** Captures keep only
   the names formation requires. Marshalling writes one row per reached
-  environment or built collection, preserving shared allocations rather
-  than copying them per closure. Code is written once per closure holding it.
+  environment, preserving shared allocations rather than copying them per
+  closure. Code is written once per closure holding it.
 
 ## What it costs
 
@@ -118,7 +125,8 @@ Narrative:
 
 ## Where
 
-- `core/src/shell/runtime/value.rs`: `ValClos::close`, `ValClos::thunk`,
-  one-layer `read`; `list.rs` and `map.rs`: `ListRef`, `MapRef`.
-- `core/src/shell/runtime/env.rs`: `Env::restrict`, `Env::EMPTY`;
-  `core/src/ir.rs`: `Node::new` caches occurrences.
+- `core/src/ir/value.rs`: `ValClos::thunk`, `VClosRef::view`;
+  `core/src/shell/runtime/close.rs`: `ValClos::close`; `ir/value/list.rs`
+  and `map.rs`: `ListRef`, `MapRef`.
+- `core/src/ir/env.rs`: `Env::restrict`, `Env::EMPTY`;
+  `core/src/ir.rs`: `Node::occ` caches occurrences on first use.

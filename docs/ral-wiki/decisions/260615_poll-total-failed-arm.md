@@ -4,6 +4,11 @@ status: active
 
 # A finished handle has one settle; the eliminators project it
 
+> Amended 2026-11-13 by [[261112_runtime-values-are-value-closures|runtime values are value closures]]:
+> a caught failure is plain record data with no witness, and `raise` of a
+> record raises it as the program's own claim, keeping frame, message, status
+> and site, without restoring the typed cause or the hints it determined.
+
 > Amended 2026-11-11 by [[decisions/261105_the-error-record|the error record]]:
 > programs read `[frame, message, status, site]`; `$e[message]` replaces
 > `describe`. `try`, `poll` and audit retain runtime witnesses, so re-raising

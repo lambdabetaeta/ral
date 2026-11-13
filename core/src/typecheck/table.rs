@@ -510,8 +510,11 @@ mod tests {
 
     fn table_errors(form: Form, src: &str) -> Vec<TypeError> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-        let top = elaborate(&ast, [], None, &mut crate::compile::no_modules)
-            .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        let top = match elaborate(&ast, [], None, &mut crate::compile::no_modules) {
+            Ok(top) => top,
+            Err(crate::compile::CompileError::Types(errors)) => return errors,
+            Err(e) => panic!("elaborate error in {src:?}: {e:?}"),
+        };
         typecheck(
             &top,
             crate::test_helper::core_schemes(),
@@ -669,8 +672,8 @@ mod tests {
 
     #[test]
     fn contracts_reach_decoder_sites_before_freezing() {
+        use crate::ir::ValClos;
         use crate::ir::{CompKind, Phrase};
-        use crate::shell::runtime::ValClos;
         use crate::ty::Fixings;
         for (form, returned, accepted, use_text) in [
             (

@@ -14,10 +14,10 @@ mod eliminate;
 mod tests;
 
 use crate::fact::{InvalidCause, Multiline};
-use crate::ir::Comp;
+use crate::ir::{Comp, Env, VClosRef, ValClos};
 use crate::shell::evaluator::machine;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Env, Mooring, Settled, Shell, TitlePolicy, ValClos};
+use crate::shell::runtime::{Mooring, Settled, Shell, TitlePolicy};
 pub(crate) use birth::exit_brood;
 use birth::{Birth, spawn_child};
 use eliminate::join;
@@ -139,7 +139,7 @@ pub(super) fn builtin_detach(
     let argv = args[2]
         .as_list("detach")?
         .iter()
-        .map(std::borrow::Cow::into_owned)
+        .map(VClosRef::into_owned)
         .collect::<Vec<_>>();
     crate::shell::exec::detach(&desc, program, &argv, mooring, shell)
 }

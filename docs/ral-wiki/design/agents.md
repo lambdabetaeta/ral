@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 ---
 
 # Agents: one thread, one life, one conversation
@@ -220,15 +220,14 @@ or itself when its parent is the human.
 - `Shell::marshal` writes lexical scope, dynamic context, sources, terms,
   fixings and `SpawnGrant` as one `Marshalled` JSON document. Every live
   handle is written as its title and arrives **withheld**, retaining its
-  binding, data position and type `Handle`, through captures, built collections,
+  binding, data position and type `Handle`, through captures, lists and maps,
   residual arguments and handler arms. Observations refuse `withheld-handle`:
   await it where it was spawned and pass its result instead.
   Partial user blocks cross as closures; builtin residuals cross as a builtin
   name, an environment row and a supplied-argument count, rebuilt from the
   receiving entry's η suffix. Zero supplied is valid (`let g = has`);
   δ never crosses. Boundary partials remain λ-closures over `Exec` with their
-  checked site. Built collections remain built and shared rows remain shared;
-  caught failures keep their typed witness. Hooks and terminal authority do
+  checked site. Shared rows remain shared; a caught failure is plain record data. Hooks and terminal authority do
   not cross.
 - The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is

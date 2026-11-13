@@ -7,8 +7,9 @@ use crate::fact::{
     LiteralOrRegex, Number, NumberFailure, NumberFault, NumberRange, Reason, ShapeFailure,
     ValueShape,
 };
+use crate::ir::{ValClos, View};
+use crate::shell::runtime::Settled;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Settled, ValClos, View};
 use std::borrow::Cow;
 
 use super::util::regex_failure;

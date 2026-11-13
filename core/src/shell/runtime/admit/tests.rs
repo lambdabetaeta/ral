@@ -22,12 +22,7 @@ fn weak_comparable(u: &mut Unifier) -> Ty {
 }
 
 fn map(entries: &[(&str, ValClos)]) -> ValClos {
-    ValClos::map(
-        entries
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.clone()))
-            .collect::<Vec<_>>(),
-    )
+    ValClos::map(entries.iter().map(|(k, v)| ((*k).to_owned(), v.clone())))
 }
 
 fn refusal(site: &Site, value: &ValClos) -> String {
@@ -495,8 +490,8 @@ fn a_site_round_trips_with_its_unit() {
 fn admission_reasons_keep_structured_causes_and_witnesses_outside_records() {
     use crate::data::datum::Datum as _;
     use crate::fact::Reason;
-    use crate::ir::Val;
-    use crate::shell::runtime::{Binding, Env, Signature};
+    use crate::ir::{Binding, Env, Val};
+    use crate::shell::runtime::Signature;
     use crate::source::Spanned;
 
     let mut env = Env::EMPTY;

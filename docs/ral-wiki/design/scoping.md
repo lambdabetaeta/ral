@@ -57,7 +57,7 @@ The lexical scoping above is one mechanism; *crossing a shell boundary* is a
 different one, and they should not be conflated.
 
 - **Lexical scope within a shell** splits ρ from Σ. `Env`
-  (`core/src/shell/runtime/env.rs`) is ρ alone: a finite map from names to bindings,
+  (`core/src/ir/env.rs`) is ρ alone: a finite map from names to bindings,
   read with no fallback. `Signature` (`core/src/shell/runtime/signature.rs`) is Σ —
   the natives and the frozen prelude, constants of the running shell, one per
   shell, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env, sig)`

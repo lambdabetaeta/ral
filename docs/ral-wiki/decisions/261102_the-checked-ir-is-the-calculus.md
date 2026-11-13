@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: d50aa681
+generated_at_commit: 9290eb03
 generated_at_date: 2026-11-13
-verified_at_commit: d50aa681
+verified_at_commit: 9290eb03
 verified_at_date: 2026-11-13
 anchors: [CompKind, CompKind::Builtin, CompKind::Use, Prim, Val, ValClos, BuiltinEntry::eta, Stack::settle, Frame, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
 ---
@@ -91,5 +91,5 @@ concatenation. The checker writes returned-thunk forces and binding captures
   `captured_string` builds capture/decode
   ([[internals/type-inference|type inference]]).
 - `core/src/shell/evaluator/machine.rs`: `Stack::settle`, `Frame`,
-  `CompClosure`, `Next`; `core/src/shell/runtime/value.rs`: `ValClos`;
+  `CompClosure`, `Next`; `core/src/ir/value.rs`: `ValClos`;
   `core/src/builtin.rs`: `BuiltinEntry::eta`.

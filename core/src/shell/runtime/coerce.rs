@@ -1,18 +1,18 @@
 //! The decoders of a builtin's arguments.
 
-use super::{Break, Env, Error, ListRef, MapRef, ValClos, View};
+use super::{Break, Error};
 use crate::fact::{
     BlockRole, CodecFailure, CodecFailureUtf8, Expected, IllTyped, InvalidCause, InvalidFailure,
     Reason, ShapeFailure, Utf8Failure, Utf8Subject, ValueShape,
 };
 use crate::handle::HandleInner;
-use crate::ir::Comp;
+use crate::ir::{Comp, Env, ListRef, MapRef, VClosRef, ValClos, View};
 use std::sync::Arc;
 
 /// Each decoder fails with a bare `Error`: a shape mismatch is never an exit.
-impl ValClos {
+impl<'a> VClosRef<'a> {
     /// A shape refusal with a semantic operation, not a diagnostic headline.
-    pub fn expected(&self, operation: &str, expected: Expected) -> Error {
+    pub fn expected(self, operation: &str, expected: Expected) -> Error {
         invalid(
             operation,
             InvalidCause::Shape(ShapeFailure {
@@ -26,7 +26,7 @@ impl ValClos {
     ///
     /// # Errors
     /// `self` is not a `String`.
-    pub fn as_str(&self, ctx: &str) -> Result<&str, Error> {
+    pub fn as_str(self, ctx: &str) -> Result<&'a str, Error> {
         match self.view() {
             View::String(s) => Ok(s.as_str()),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::String))),
@@ -35,7 +35,7 @@ impl ValClos {
 
     /// # Errors
     /// `self` is not `Bytes`.
-    pub(crate) fn as_bytes(&self, ctx: &str) -> Result<&[u8], Error> {
+    pub(crate) fn as_bytes(self, ctx: &str) -> Result<&'a [u8], Error> {
         match self.view() {
             View::Bytes(b) => Ok(b),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Bytes))),
@@ -44,11 +44,56 @@ impl ValClos {
 
     /// # Errors
     /// `self` is not a `Handle`.
-    pub(crate) fn expect_handle(&self, ctx: &str) -> Result<&HandleInner, Error> {
+    pub(crate) fn expect_handle(self, ctx: &str) -> Result<&'a HandleInner, Error> {
         match self.view() {
             View::Handle(h) => h.live(),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Handle))),
         }
+    }
+
+    /// # Errors
+    /// `self` is not a `List`.
+    pub fn as_list(self, ctx: &str) -> Result<ListRef<'a>, Error> {
+        match self.view() {
+            View::List(items) => Ok(items),
+            _ => Err(self.expected(ctx, Expected::Shape(ValueShape::List))),
+        }
+    }
+
+    /// # Errors
+    /// `self` is not a `Map`.
+    pub fn as_map(self, ctx: &str) -> Result<MapRef<'a>, Error> {
+        match self.view() {
+            View::Map(m) => Ok(m),
+            _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Map))),
+        }
+    }
+}
+
+impl ValClos {
+    pub fn expected(&self, operation: &str, expected: Expected) -> Error {
+        VClosRef::from(self).expected(operation, expected)
+    }
+    /// # Errors
+    /// As [`VClosRef::as_str`].
+    pub fn as_str(&self, ctx: &str) -> Result<&str, Error> {
+        VClosRef::from(self).as_str(ctx)
+    }
+    pub(crate) fn as_bytes(&self, ctx: &str) -> Result<&[u8], Error> {
+        VClosRef::from(self).as_bytes(ctx)
+    }
+    pub(crate) fn expect_handle(&self, ctx: &str) -> Result<&HandleInner, Error> {
+        VClosRef::from(self).expect_handle(ctx)
+    }
+    /// # Errors
+    /// As [`VClosRef::as_list`].
+    pub fn as_list(&self, ctx: &str) -> Result<ListRef<'_>, Error> {
+        VClosRef::from(self).as_list(ctx)
+    }
+    /// # Errors
+    /// As [`VClosRef::as_map`].
+    pub fn as_map(&self, ctx: &str) -> Result<MapRef<'_>, Error> {
+        VClosRef::from(self).as_map(ctx)
     }
 
     /// A spawn or watch body: whatever [`ValClos::into_computation`] forces,
@@ -60,24 +105,6 @@ impl ValClos {
         self.clone()
             .into_computation()
             .map_err(|refused| refused.expected(ctx, Expected::Shape(ValueShape::Block)))
-    }
-
-    /// # Errors
-    /// `self` is not a `List`.
-    pub fn as_list(&self, ctx: &str) -> Result<ListRef<'_>, Error> {
-        match self.view() {
-            View::List(items) => Ok(items),
-            _ => Err(self.expected(ctx, Expected::Shape(ValueShape::List))),
-        }
-    }
-
-    /// # Errors
-    /// `self` is not a `Map`.
-    pub fn as_map(&self, ctx: &str) -> Result<MapRef<'_>, Error> {
-        match self.view() {
-            View::Map(m) => Ok(m),
-            _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Map))),
-        }
     }
 }
 

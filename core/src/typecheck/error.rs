@@ -538,6 +538,20 @@ pub struct TypeError {
 }
 
 impl TypeError {
+    /// A literal that writes `label` twice, refused by the elaborator because
+    /// the node it builds holds one value per key.
+    pub(crate) fn duplicate_field(label: &str, at: Option<Span>) -> Self {
+        Self {
+            pos: at,
+            kind: TypeErrorKind::DuplicateField {
+                label: label.to_string(),
+            },
+            reason: None,
+            weak: None,
+            unit: None,
+        }
+    }
+
     /// The optional guidance sentence for this error, composed in `explain.rs`.
     pub fn hint(&self) -> Option<String> {
         super::explain::hint(

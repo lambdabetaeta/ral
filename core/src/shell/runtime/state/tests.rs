@@ -1,5 +1,5 @@
-use super::super::value::ValClos;
 use super::*;
+use crate::ir::ValClos;
 
 #[test]
 fn host_bindings_keep_the_declared_closed_scheme() {
@@ -21,8 +21,9 @@ fn host_bindings_keep_the_declared_closed_scheme() {
 #[test]
 fn refused_host_blocks_install_no_hook() {
     use crate::fact::{BlockRole, InvalidCause, Reason};
+    use crate::ir::Env;
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, Val, ValListElem};
-    use crate::shell::runtime::{DefaultPolicy, Env, HookName, HookSig};
+    use crate::shell::runtime::{DefaultPolicy, HookName, HookSig};
     use crate::source::Spanned;
     let refused_as = |error: crate::error::Error, role: BlockRole| {
         let Reason::Invalid(failure) = error.reason else {

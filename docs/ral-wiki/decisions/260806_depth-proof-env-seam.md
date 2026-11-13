@@ -4,6 +4,11 @@ status: accepted
 
 # Stream depth must not be bounded by the stack
 
+> **Amended 2026-11-13 — Built collections:**
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]]:
+> built collections are ordinary closures, so the walks and the drop
+> trampoline reach them as environments and captures, not as separate nodes.
+
 > **Amended 2026-11-12 — Marshalling:**
 > [[design/engine-protocol|the engine protocol]]
 > replaces the encoder with one dependencies-first walk over environments

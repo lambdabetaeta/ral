@@ -1,8 +1,8 @@
 //! ral's structural equality and exact numeric order.
 
-use super::{ValClos, View};
 use crate::data::Finite;
 use crate::fact::{CompareFailure, EqualityOrOrder, EvalFailure, Reason, ValueShape};
+use crate::ir::{VClosRef, ValClos, View};
 use crate::shell::runtime::{Error, Settled};
 use std::cmp::Ordering;
 
@@ -41,8 +41,8 @@ fn comparison_error(
         },
     ))))
 }
-impl ValClos {
-    fn number_order(&self, other: &Self) -> Option<Ordering> {
+impl VClosRef<'_> {
+    fn number_order(self, other: Self) -> Option<Ordering> {
         match (self.view(), other.view()) {
             (View::Int(a), View::Int(b)) => Some(a.cmp(&b)),
             (View::Int(a), View::Float(b)) => Some(cmp_int_float(a, b)),
@@ -53,7 +53,7 @@ impl ValClos {
     }
     /// # Errors
     /// Either side is a block, function or handle.
-    pub(crate) fn equals(&self, other: &Self) -> Settled<bool> {
+    pub(crate) fn equals(self, other: Self) -> Settled<bool> {
         let (left_labels, left) = self.peel_variants();
         let (right_labels, right) = other.peel_variants();
         if left_labels.iter().zip(&right_labels).any(|(a, b)| a != b) {
@@ -73,28 +73,26 @@ impl ValClos {
             );
         }
         // An absent tag payload short-circuits before inspecting the other payload.
-        if !left_labels.is_empty()
-            && matches!(left.view(), View::Unit) != matches!(right.view(), View::Unit)
-        {
+        if !left_labels.is_empty() && left.is_unit() != right.is_unit() {
             return Ok(false);
         }
         Ok(match (left.view(), right.view()) {
             (View::Unit, View::Unit) => true,
             (View::Bool(a), View::Bool(b)) => a == b,
             (View::Int(_) | View::Float(_), View::Int(_) | View::Float(_)) => {
-                left.number_order(&right) == Some(Ordering::Equal)
+                left.number_order(right) == Some(Ordering::Equal)
             }
             (View::String(a), View::String(b)) => a == b,
             (View::Bytes(a), View::Bytes(b)) => a == b,
             (View::List(a), View::List(b)) => {
-                a.len() == b.len() && all(a.iter().zip(b.iter()).map(|(a, b)| a.equals(&b)))?
+                a.len() == b.len() && all(a.iter().zip(b.iter()).map(|(a, b)| a.equals(b)))?
             }
             (View::Map(a), View::Map(b)) => {
                 a.len() == b.len()
                     && all(a
                         .iter()
                         .zip(b.iter())
-                        .map(|((ka, a), (kb, b))| Ok(ka == kb && a.equals(&b)?)))?
+                        .map(|((ka, a), (kb, b))| Ok(ka == kb && a.equals(b)?)))?
             }
             _ if left.opacity().is_some() || right.opacity().is_some() => {
                 return Err(comparison_error(
@@ -110,7 +108,7 @@ impl ValClos {
     }
     /// # Errors
     /// Anything but numbers or two strings.
-    pub(crate) fn compare(&self, other: &Self, op: &str) -> Settled<Ordering> {
+    pub(crate) fn compare(self, other: Self, op: &str) -> Settled<Ordering> {
         if let Some(order) = self.number_order(other) {
             return Ok(order);
         }
@@ -122,10 +120,18 @@ impl ValClos {
         }
     }
 }
+impl ValClos {
+    pub(crate) fn equals(&self, other: &Self) -> Settled<bool> {
+        VClosRef::from(self).equals(other.into())
+    }
+    pub(crate) fn compare(&self, other: &Self, op: &str) -> Settled<Ordering> {
+        VClosRef::from(self).compare(other.into(), op)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::{Env, block_over};
+    use crate::ir::{Env, block_over};
     fn float(f: f64) -> ValClos {
         ValClos::float(Finite::new(f).expect("finite"))
     }

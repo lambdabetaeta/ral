@@ -546,16 +546,16 @@ The handler receives exactly `[frame, message, status, site]` (SPEC §8.6).
 signal `n`, 127 for a missing command, and 1 for `fail`. `site` is always
 `[script: String, line: Int, col: Int]`.
 
-Raise from text; re-raise a caught record unchanged:
+Raise from text, or raise a record:
 
     fail 'usage: deploy HOST'
     try { risky-work } { |error| raise $error }
 
 An unhandled `fail` exits 1. To choose a code, use `exit n` at top level.
-`raise` takes a hand-built record as given, including its frame and site, but
-refuses a `status` of 0 (use `return`) or above 255. Re-raising a caught record
-preserves its cause and the hints it determines, not situational advice or
-unwind notes from the first report.
+`raise` takes any record, caught or hand-built, as the program's own claim,
+keeping its frame, message, status and site, but refuses a `status` of 0 (use
+`return`) or above 255. A caught error is plain data, so raising it again does
+not restore its typed cause or the hints that cause determined.
 
 Use `with-temp-dir` for a temporary workspace. It acquires the directory
 under a cancellation shield and removes it when the body ends, including on

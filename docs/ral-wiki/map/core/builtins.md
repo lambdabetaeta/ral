@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
-generated_at_date: 2026-11-12
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -249,8 +249,8 @@ Bodies are grouped by concern, one submodule each:
   worker's one-shot `CapturedBytes::take` at completion),
   `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``
   (the ok/err half of `End::outcome`, its `` `err `` payload built through
-  `outcome_value` and `ValClos::failure`, the witnessed record `try` hands its
-  handler), or
+  `outcome_value`, as plain record data: the record `try` hands its handler),
+  or
   `` `consumed [elapsed] ``. A worker stopped from elsewhere settles with its
   own `cancelled`/`timed-out` error; on a `Ready` handle an `exit`, a
   foreign stop or a panic is re-raised, as `await` re-raises them, while `poll`
@@ -358,10 +358,9 @@ Bodies are grouped by concern, one submodule each:
   whose result is or holds any handle projects to `Err`, status 1
   (`core/src/shell/run/report.rs`);
 - `misc.rs` — `fail` takes a `String`, raising `Reason::raised` (a `Claim`
-  of status 1); `raise` re-raises the `ErrorFact` a witnessed map holds
-  (`MapRef::witness`) and otherwise decodes the closed `[frame, message, status,
-  site]` record into a claim, refusing status 0 (`InvalidCause::ZeroStatus`)
-  and above 255. There is no `describe` builtin. `exit` refuses outside
+  of status 1); `raise` decodes any closed `[frame, message, status, site]`
+  record into a claim (`ErrorRecord::claim`), keeping its four fields,
+  refusing status 0 (`InvalidCause::ZeroStatus`) and above 255. There is no `describe` builtin. `exit` refuses outside
   `0..=255`. See
   [[decisions/261105_the-error-record|the error record]]. `builtin_surface` is the body
   `SURFACE_BUILTIN` (above) wraps: it forwards a tagged variant to the host's
@@ -390,12 +389,12 @@ Bodies are grouped by concern, one submodule each:
   head is judged as a launch would be (`Command::lookup` under the live grant
   stack): a bundled tool reads `bundled`, a refused head `denied by grant`
   naming the path as requested;
-- `print.rs` — the shell's runtime values as a `Printable` view onto the one
+- `print.rs` — the shell's runtime values (`Printable` for `VClosRef`) as a view onto the one
   value pretty-printer, which lives beneath the shell in `data/print.rs`
   (`PrintParams`, `pretty_print`; re-exported here), with the REPL's numbers
   in `REPL_PRINT_PARAMS`. `Printable::Child` carries variant payloads as well
-  as list/map children (`Cow<ValClos>` for runtime values, references for
-  `FOValue`). The REPL, exarch's tool-result rendering and a grant
+  as list/map children (`Cow::Owned` of a borrowed copy for runtime values,
+  references for `FOValue`). The REPL, exarch's tool-result rendering and a grant
   shown to its agent share it; a rendering utility, not a registered
   builtin. One printer, one policy, per-reader numbers: truncation preserves
   identity — the depth limit summarises (keys and heads) and only the floor

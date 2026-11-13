@@ -369,7 +369,8 @@ mod tests {
     fn worker_row_is_coherent_across_running_stopping_ready_and_consumed() {
         use crate::handle::HandleInner;
         use crate::io::Streams;
-        use crate::shell::runtime::{Done, End, Owner, ValClos, WorkerId};
+        use crate::ir::ValClos;
+        use crate::shell::runtime::{Done, End, Owner, WorkerId};
 
         let mut shell = crate::test_helper::core_shell();
         shell.arm_worker_retention(4);

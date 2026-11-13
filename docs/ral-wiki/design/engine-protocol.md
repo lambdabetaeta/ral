@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 ---
 
 # The engine protocol
@@ -164,13 +164,13 @@ host/guest skew is gated by `PROTOCOL_VERSION` at attach.
 
 **Marshalling preserves how values are held and what they share.**
 
-- An explicit dependencies-first walk writes each environment and built
-  collection once, by allocation identity. Row `i` names only rows `j < i`;
+- An explicit dependencies-first walk writes each environment once, by
+  allocation identity. Row `i` names only rows `j < i`;
   the root environment and handler frames may name any row. No value nests
   another wire value, and tag spines cross as flat lists.
-- Syntax crosses as a closure over its environment row; built lists and maps
-  cross as rows, without materialising literals. Shared environments and built
-  collections remain shared in the child. IR is copied once per closure that
+- Syntax crosses as a closure over its environment row; a list or map built
+  at run time is such a closure, its elements bound in the row. Shared
+  environments remain shared in the child. IR is copied once per closure that
   holds it, not shared across closures.
 - Builtins cross by name. A residual crosses as a builtin name, an environment
   row and a supplied-argument count; the receiving entry reconstructs its own
@@ -178,8 +178,9 @@ host/guest skew is gated by `PROTOCOL_VERSION` at attach.
   a value closure's root, never beneath a tag.
 - Writing a live handle as its title withholds it in place, under both
   carriers. Names, positions and `Handle` types survive; observations refuse
-  `withheld-handle`. A caught failure crosses with its typed `ErrorFact`
-  witness intact ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+  `withheld-handle`. A caught failure is plain record data and crosses as a
+  closure; a worker's own failure crosses as its `ErrorFact`
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 - Reading admits and constructs each row in one pass, then the roots: a
   structural decode, then a semantic admission of every IR leaf and node,
   since the structural decoder admits no semantic serde validators. Every

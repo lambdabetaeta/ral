@@ -6,7 +6,7 @@ links a module at check time.** The seven are `within`, `grant`, `try`,
 across an operand's whole dynamic extent. Ordinary Hindley–Milner typing is
 no criterion: `try`, `guard` and `gather` have HM types.
 
-- `try` intercepts errors and passes a witnessed record to its handler.
+- `try` intercepts errors and passes the error record to its handler.
 - `guard ACQUIRE BODY RELEASE` shields acquisition, installs release before
   the body's first poll, then releases with the resource and ending. Release
   observes but cannot consume that ending; its own halt pre-empts it

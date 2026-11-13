@@ -9,8 +9,8 @@ pub(crate) mod pattern;
 pub(crate) mod scope;
 
 use crate::fact::{ApplyFailure, CallOrForce, EvalFailure, Reason};
-use crate::ir::{Comp, Pattern, Phrase, Toplevel};
-use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, ValClos, View};
+use crate::ir::{Binding, Comp, Env, Pattern, Phrase, Toplevel, ValClos, View};
+use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::ty::Closed;
 use std::sync::Arc;
 

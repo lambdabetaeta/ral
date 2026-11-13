@@ -8,12 +8,11 @@
 use super::super::command::{self, Started};
 use super::stage::{Drain, ExternalEnd, LiveExternal, StageFrame, StageHandle, StageKind};
 use crate::fact::AuditIo;
+use crate::ir::ValClos;
 use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalHold, WaitOutcome, Watch,
 };
-use crate::shell::runtime::{
-    AuditFragment, Break, End, Mooring, Settled, Shell, Stop, UNREPORTED, ValClos,
-};
+use crate::shell::runtime::{AuditFragment, Break, End, Mooring, Settled, Shell, Stop, UNREPORTED};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};

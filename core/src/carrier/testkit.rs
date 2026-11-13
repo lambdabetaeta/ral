@@ -187,7 +187,7 @@ pub(crate) fn assert_normalized(original: &Error, received: &Error) {
 /// A real engine-side enquiry door, for provenance/report fixtures.
 pub(crate) fn enquiring_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
     use crate::builtin::{BuiltinBody, BuiltinEntry};
-    use crate::shell::runtime::ValClos;
+    use crate::ir::ValClos;
     use crate::typecheck::builtins::{pure, thunk};
     let mut runtime = crate::HostSurface::default().runtime(spec.terminal)?;
     let entry = BuiltinEntry::new(

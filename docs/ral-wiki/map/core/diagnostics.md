@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ed1b37eb
-generated_at_date: 2026-11-12
+generated_at_commit: 9290eb03
+generated_at_date: 2026-11-13
 covers_paths: [core/src/error.rs, core/src/fact/error.rs, core/src/fact/error/, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
@@ -181,8 +181,9 @@ A denial's intrinsic remedy precedes stored hints. Other reasons show stored
 hints, then `context_advice` for the report's operation context, then intrinsic
 and exit-table advice. All are shown, composed under SPEC §13.1; stored hints
 retain attachment order. Context prefixes never change the reason. Intrinsic
-advice survives record projection and re-raise by recomputation; report-context
-advice does not survive without that context. The renderer then adds the
+advice is recomputed from the reason at each render, and a record carries no
+reason, so a `raise` of one has none; report-context advice does not survive
+without that context. The renderer then adds the
 saturating counted discard and, when no note is present and the failure is not
 a spawn refusal, an abandoned-tail note.
 A panic is spanless `run panicked: …`; values, exits and reader-gone stops
@@ -233,7 +234,7 @@ in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 the front end's, never a probe of its own null stdio. Before any seat,
 `stderr_color` answers from one memoised `Auto` probe, so early-startup errors
 still colour, and `ui_color` is false: only a front end has a UI. The
-`$TERMINAL` map is `impl From<&TerminalState> for Value` (`shell/runtime/value.rs`).
+`$TERMINAL` map is `impl From<&TerminalState> for ValClos` (`ir/value.rs`).
 `TerminalState` stores base facts only: `hyperlinks`, `clipboard_write` (both `modern_osc`) and
 `bracketed_paste` (`supports_ansi`) are methods, so no two fields can disagree, and the
 `$TERMINAL` keys of those names are derived.

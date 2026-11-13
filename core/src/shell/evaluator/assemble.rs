@@ -1,15 +1,12 @@
 //! Pure collection assembly.
 
 use crate::fact::{EvalFailure, Expected, Reason, ValueShape};
-use crate::ir::{MapEntryV, Name, Val, ValListElem};
-use crate::shell::runtime::{Break, Env, Error, List, Map, Settled, Signature, ValClos, View};
+use crate::ir::{Env, MapEntryV, Name, Val, ValClos, ValListElem, View};
+use crate::shell::runtime::{Break, Error, Settled, Signature};
 use crate::source::Spanned;
+use std::collections::BTreeMap;
 
-pub(super) fn spread_type_err(val: &ValClos) -> Error {
-    val.expected("spread", Expected::Shape(ValueShape::List))
-}
-
-/// Cons and snoc reuse the spread's persistent spine, evaluating left to right.
+/// Evaluated left to right; a spread shares its persistent node ([`crate::ir::ListRef::concat`]).
 pub(super) fn eval_list(
     elems: &[ValListElem],
     env: &Env,
@@ -17,42 +14,18 @@ pub(super) fn eval_list(
 ) -> Result<ValClos, Error> {
     use ValListElem::{Single, Spread};
 
-    if let [Single(sx), Spread(sxs)] = elems {
-        let x = ValClos::close(&sx.item, env, sig)?;
-        let xs = ValClos::close(&sxs.item, env, sig)?;
-        let View::List(v) = xs.view() else {
-            return Err(spread_type_err(&xs));
-        };
-        let mut v = v.to_list();
-        v.push_front(x);
-        return Ok(v.into());
-    }
-
-    if let [Spread(sxs), Single(sx)] = elems {
-        let xs = ValClos::close(&sxs.item, env, sig)?;
-        let x = ValClos::close(&sx.item, env, sig)?;
-        let View::List(v) = xs.view() else {
-            return Err(spread_type_err(&xs));
-        };
-        let mut v = v.to_list();
-        v.push_back(x);
-        return Ok(v.into());
-    }
-
-    let mut items = List::new();
-    for elem in elems {
-        match elem {
-            Single(v) => items.push_back(ValClos::close(&v.item, env, sig)?),
-            Spread(v) => {
-                let val = ValClos::close(&v.item, env, sig)?;
-                match val.view() {
-                    View::List(inner) => items.append(inner.to_list()),
-                    _ => return Err(spread_type_err(&val)),
-                }
-            }
-        }
-    }
-    Ok(items.into())
+    let close = |elem: &Spanned<Val>| ValClos::close(&elem.item, env, sig);
+    elems
+        .iter()
+        .try_fold(ValClos::list(Vec::new()), |acc, elem| {
+            let View::List(items) = acc.view() else {
+                unreachable!("the accumulator is a list")
+            };
+            Ok(match elem {
+                Single(x) => items.snoc(close(x)?),
+                Spread(xs) => items.concat(close(xs)?.as_list("spread")?),
+            })
+        })
 }
 
 pub(super) fn eval_update(
@@ -61,21 +34,20 @@ pub(super) fn eval_update(
     env: &Env,
     sig: &Signature,
 ) -> Result<ValClos, Error> {
-    let mut pairs = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut result = BTreeMap::new();
     for (key, value) in fields {
-        if !seen.insert(key.to_string()) {
+        if result.contains_key(key.as_ref()) {
             return Err(duplicate_key(key));
         }
-        pairs.push((key.to_string(), ValClos::close(&value.item, env, sig)?));
+        result.insert(key.to_string(), ValClos::close(&value.item, env, sig)?);
     }
     let base = ValClos::close(&base.item, env, sig)?;
-    for (key, value) in base.as_map("spread")? {
-        if seen.insert(key.to_string()) {
-            pairs.push((key.to_string(), value.into_owned()));
-        }
+    for (key, value) in base.as_map("spread")?.iter() {
+        result
+            .entry(key.to_string())
+            .or_insert_with(|| value.into_owned());
     }
-    Ok(ValClos::map(pairs))
+    Ok(ValClos::map(result))
 }
 
 pub(super) fn eval_map(
@@ -85,7 +57,7 @@ pub(super) fn eval_map(
 ) -> Settled<ValClos> {
     let sig = &shell.sig;
     let mut explicit = std::collections::HashSet::new();
-    let mut result = Map::new();
+    let mut result = BTreeMap::new();
     for entry in entries {
         match entry {
             MapEntryV::Entry(key, value) => {
@@ -111,15 +83,15 @@ pub(super) fn eval_map(
                 let map = formed
                     .as_map("spread")
                     .map_err(|error| Break::from(error).locate("map", value.span, shell))?;
-                for (key, value) in map {
-                    if !result.contains_key(key) {
-                        result.insert(key.to_string(), value.into_owned());
-                    }
+                for (key, value) in map.iter() {
+                    result
+                        .entry(key.to_string())
+                        .or_insert_with(|| value.into_owned());
                 }
             }
         }
     }
-    Ok(result.into())
+    Ok(ValClos::map(result))
 }
 
 fn duplicate_key(key: &str) -> Error {

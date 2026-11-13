@@ -9,7 +9,8 @@
 //! trail scope (`Audit::open` / `Audit::close`) around its body.
 
 use crate::builtin::BuiltinEntry;
-use crate::shell::runtime::{Mooring, Settled, Shell, ValClos};
+use crate::ir::ValClos;
+use crate::shell::runtime::{Mooring, Settled, Shell};
 use std::sync::Arc;
 
 /// Run a native body in a fresh call frame.

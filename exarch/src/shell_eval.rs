@@ -15,9 +15,9 @@ pub mod surface;
 use crate::bus::{AgentAddress, Input};
 use base64::Engine;
 use ral_core::Shell;
-use ral_core::ValClos;
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{CapturePolicy, DeferredSink, TitlePolicy};
+use ral_core::{VClosRef, ValClos};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,7 +156,7 @@ pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
         FOValue::String { value } => Some(value.clone()),
         FOValue::Bytes { value } => Some(String::from_utf8_lossy(value).into_owned()),
         other => Some(ral_core::shell::builtins::pretty_print(
-            &ValClos::from(other.clone()),
+            &VClosRef::from(&ValClos::from(other.clone())),
             0,
             &VALUE_PRINT_PARAMS,
         )),

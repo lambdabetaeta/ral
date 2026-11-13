@@ -12,7 +12,8 @@
 //! `[String] → Command`, with no type rule to supply.
 
 use crate::builtin::{BuiltinBody, BuiltinEntry};
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, ValClos};
+use crate::ir::ValClos;
+use crate::shell::runtime::{Break, Mooring, Settled, Shell};
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
 use std::borrow::Cow;
 
@@ -154,7 +155,7 @@ builtin_registry! {
         doc: "fail <String>  — raise a fresh failure. Use `raise $e` to re-raise an error record.",
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
     Raise { names: ["raise"], ty: scheme::raise,
-        doc: "raise <ErrorRecord>  — re-raise a caught record unchanged; raise a hand-built one as its claim.",
+        doc: "raise <ErrorRecord>  — raise an error record as the program's own claim, keeping its frame, message, status and site.",
         call: |args, _, _| Err(misc::builtin_raise(args)), },
     Length { names: ["length"], ty: scheme::length,
         doc: "length <list>  — the number of elements in a list. Count text with `length !{chars $s}`, a map with `length !{keys $m}`.",

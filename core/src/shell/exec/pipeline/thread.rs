@@ -234,7 +234,7 @@ mod tests {
                         |_, _, _, child| {
                             child.write_stdout(b"out-tail").unwrap();
                             child.write_stderr(b"err-tail").unwrap();
-                            Ok(crate::shell::runtime::ValClos::UNIT)
+                            Ok(crate::ir::ValClos::UNIT)
                         }
                     },
                     ..crate::shell::evaluator::STAGE_EVAL
@@ -346,7 +346,7 @@ mod tests {
             eval: super::super::StageEval {
                 run: |_, _, mooring, _| {
                     mooring.home.cancel(CancelCause::ReaderGone);
-                    Ok(crate::shell::runtime::ValClos::UNIT)
+                    Ok(crate::ir::ValClos::UNIT)
                 },
                 ..crate::shell::evaluator::STAGE_EVAL
             },
@@ -390,11 +390,11 @@ mod tests {
             "shell::exec::pipeline::thread::tests::a_nested_pipeline_retains_its_owners_input_decision",
             || {
                 fn nested(
-                    env: &crate::shell::runtime::Env,
+                    env: &crate::ir::Env,
                     mooring: &Mooring,
                     shell: &mut crate::shell::runtime::Shell,
                     readable: bool,
-                ) -> Settled<crate::shell::runtime::ValClos> {
+                ) -> Settled<crate::ir::ValClos> {
                     assert!(matches!(
                         (readable, &shell.io.stdin),
                         (true, crate::io::Source::Terminal) | (false, crate::io::Source::Empty)
@@ -408,12 +408,12 @@ mod tests {
                         run: if readable {
                             |_, _, _, child| {
                                 assert!(matches!(child.io.stdin, crate::io::Source::Terminal));
-                                Ok(crate::shell::runtime::ValClos::UNIT)
+                                Ok(crate::ir::ValClos::UNIT)
                             }
                         } else {
                             |_, _, _, child| {
                                 assert!(matches!(child.io.stdin, crate::io::Source::Empty));
-                                Ok(crate::shell::runtime::ValClos::UNIT)
+                                Ok(crate::ir::ValClos::UNIT)
                             }
                         },
                         ..crate::shell::evaluator::STAGE_EVAL

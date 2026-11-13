@@ -525,8 +525,9 @@ mod tests {
     use super::*;
     use crate::handle::compacting::MIN_SWEEP_AT;
     use crate::io::Streams;
+    use crate::ir::ValClos;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::{End, ValClos};
+    use crate::shell::runtime::End;
 
     fn test_handle(id: u64, title: &str) -> (HandleInner, impl FnOnce()) {
         let (handle, permit) = HandleInner::new(

@@ -5,9 +5,9 @@ use crate::authority::policy::{Flag, ShellVerb};
 use crate::authority::sandbox::Ownership;
 use crate::error::Error;
 use crate::fact::Receipt;
-use crate::ir::CommandName;
+use crate::ir::{CommandName, ValClos};
 use crate::process::{Scope, StdioSpec, group::Survivor};
-use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell, ValClos};
+use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell};
 
 /// `detach <desc> <program> <args>`: resolve `program` as `^program` would,
 /// and return the receipt `[pid: Int, desc: String]`. The session never waits for,

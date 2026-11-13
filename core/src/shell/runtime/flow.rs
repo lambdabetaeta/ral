@@ -1,10 +1,10 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::Shell;
-use super::value::ValClos;
 use crate::error::{Error, Prov};
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
 use crate::io::Io;
+use crate::ir::ValClos;
 use crate::process::{CancelCause, Cancellation, Scope, ScopeId};
 use crate::source::{SourceDb, Span};
 use std::num::NonZeroU8;

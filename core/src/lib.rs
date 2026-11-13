@@ -62,13 +62,14 @@ pub mod uutils;
 // evaluator or syntax layers through the crate root.
 pub use handle::{Handle, HandleInner};
 pub use io::{Captured, Retained, RunIo, RunStdin, Streams};
+pub use ir::{ListRef, MapRef, VClosRef, ValClos, View};
 pub use process::RequestedTerminalAccess;
 pub use role::{Invocation, Role, classify};
 pub use shell::boot::HostSurface;
 pub use shell::grant::SpawnGrant;
 pub use shell::runtime::{
-    Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, List, ListRef, Map, MapRef,
-    RegisterError, Runtime, Settled, Shell, SurfaceSink, ValClos, View,
+    Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, RegisterError, Runtime,
+    Settled, Shell, SurfaceSink,
 };
 pub use ty::Scheme;
 pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};

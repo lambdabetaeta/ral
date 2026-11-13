@@ -7,7 +7,6 @@ use crate::fact::{
 };
 use crate::shell::runtime::invalid;
 use either::Either;
-use std::borrow::Cow;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -17,8 +16,8 @@ use crate::io::{self, Sink};
 use crate::ir::Name;
 use crate::ir::Redirects;
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Pattern, Prim, Val, ValListElem,
-    is_synthetic,
+    Argv, Binding, CaseArm, CommandName, CommandWord, Comp, CompKind, Env, Pattern, Prim, VClosRef,
+    Val, ValClos, ValListElem, View, is_synthetic,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -28,14 +27,12 @@ use crate::shell::exec::redirect::RedirectState;
 use crate::shell::exec::resolve::Resolution;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
-    Binding, Break, CapturePolicy, DisplacedSite, Env, Error, Escape, FrameHandle, FrameName,
-    HandlerArity, HandlerFrame, HandlerLookup, Mooring, Settled, Shell, Signature, TrailScope,
-    ValClos, View, report_value,
+    Break, CapturePolicy, DisplacedSite, Error, Escape, FrameHandle, FrameName, HandlerArity,
+    HandlerFrame, HandlerLookup, Mooring, Settled, Shell, Signature, TrailScope, report_value,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
 
-use super::assemble::spread_type_err;
 use super::expr;
 use super::pattern;
 use super::scope::{WithinScope, WithinUndo};
@@ -236,7 +233,7 @@ fn exit_case(outcome: &Settled<ValClos>, shell: &Shell) -> ValClos {
     };
     let (label, payload) = match ending {
         ExitCase::Ok => (tag::OK, ValClos::UNIT),
-        ExitCase::Err(fact) => (tag::ERR, ValClos::failure(fact)),
+        ExitCase::Err(fact) => (tag::ERR, ValClos::from_datum(fact.record())),
         ExitCase::Exited(code) => (tag::EXITED, ValClos::int(code.into())),
         ExitCase::Stopped(cause) => (tag::STOPPED, ValClos::from_datum(cause)),
     };
@@ -296,10 +293,7 @@ pub(crate) fn close_argv(argv: &Argv, env: &Env, sig: &Signature) -> Result<Vec<
             ValListElem::Single(v) => out.push(ValClos::close(&v.item, env, sig)?),
             ValListElem::Spread(v) => {
                 let value = ValClos::close(&v.item, env, sig)?;
-                match value.view() {
-                    View::List(list) => out.extend(list.iter().map(Cow::into_owned)),
-                    _ => return Err(spread_type_err(&value)),
-                }
+                out.extend(value.as_list("spread")?.iter().map(VClosRef::into_owned));
             }
         }
     }
@@ -811,8 +805,7 @@ impl<'m> Stack<'m> {
             ))))
             .into());
         };
-        let payload = payload.map_or(ValClos::UNIT, Cow::into_owned);
-        self.push_args(vec![payload], span, shell)?;
+        self.push_args(vec![payload.into_owned()], span, shell)?;
         Ok(Either::Left(force_val(&arm.body.item, env, &shell.sig)?))
     }
 
@@ -1055,7 +1048,7 @@ impl<'m> Stack<'m> {
 
             Frame::Try { handler, span } => match s {
                 Break::Error(e) => {
-                    let record = ValClos::failure(e.fact(shell));
+                    let record = ValClos::from_datum(e.fact(shell).record());
                     self.enter_call("try", span, shell);
                     self.call(handler, vec![record], span, shell)
                         .map_err(|b| b.locate("try", span, shell))
@@ -1205,9 +1198,11 @@ pub(crate) fn apply(
 mod tests {
     use super::*;
     use crate::io::Retained;
+    use crate::ir::captured;
     use crate::ir::{GroupNode, Name, Occ, Phrase};
     use crate::shell::evaluator::{run_source, with_capture};
-    use crate::shell::runtime::{Break, Escape, Stop, captured};
+    use crate::shell::runtime::{Break, Escape, Stop};
+    use std::borrow::Cow;
 
     /// Run every phrase of `source` through the machine: a `Define` binds
     /// into the running `Env` with `pattern::bind`, a `Run` phrase's
@@ -1761,7 +1756,7 @@ mod tests {
         let (_, env2) = state.as_ref().expect("second unfold");
         let even2 = env2.get("even").expect("even bound");
         assert!(
-            even2.env().expect("even is a thunk").ptr_eq(&forced_env),
+            captured(Some(even2)).ptr_eq(&forced_env),
             "a later unfold's siblings hold the environment that forced it, unchanged"
         );
 
@@ -1788,11 +1783,11 @@ mod tests {
         );
     }
 
-    /// A literal forms without building: it equals the built value
-    /// element-wise, and a record iterates in a built map's order. A literal
-    /// naming nothing captures the static empty environment.
+    /// A literal forms as syntax over what it mentions: it reads as the built
+    /// value, and a record iterates in a built map's order. A literal naming
+    /// nothing captures the empty environment.
     #[test]
-    fn a_literal_forms_without_building() {
+    fn a_literal_forms_as_syntax_over_its_capture() {
         let mut shell = new_shell();
         let out = run_source(
             "let x = 1\nlet r = [b: [$x, 2], a: $x]\nreturn $r",
@@ -1802,9 +1797,15 @@ mod tests {
         let View::Map(record) = out.view() else {
             panic!("expected a record, got {out:?}")
         };
+        let (val, env) = out.parts();
         assert!(
-            out.env().is_some(),
-            "a literal forms as a value closure, not built data"
+            matches!(val, Val::Record(_)),
+            "a record literal stays syntax"
+        );
+        assert_eq!(
+            env.names().map(ToString::to_string).collect::<Vec<_>>(),
+            ["x"],
+            "a literal captures only what it mentions"
         );
 
         let expected = ValClos::map(vec![
@@ -1827,8 +1828,8 @@ mod tests {
         let inner = record.get("b").expect("a list field").into_owned();
         assert!(matches!(inner.view(), View::List(_)), "expected a list");
         assert!(
-            inner.env().is_some(),
-            "a nested list literal also forms as a value closure"
+            inner.parts().1.get("x").is_some(),
+            "a nested list literal shares the capture it mentions"
         );
 
         let out = run_source("let l = [1, 2]\nreturn $l", &mut shell)
@@ -1837,12 +1838,9 @@ mod tests {
             matches!(out.view(), View::List(_)),
             "expected a list, got {out:?}"
         );
-        let env = out
-            .env()
-            .expect("a literal naming nothing is still a literal");
         assert!(
-            env.ptr_eq(&Env::new()),
-            "a literal naming nothing captures the static empty environment"
+            out.parts().1.is_empty(),
+            "a literal naming nothing captures the empty environment"
         );
     }
 

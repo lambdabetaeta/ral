@@ -21,8 +21,9 @@ use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::authority::grant::value::GrantValue;
 use ral_core::own::UserFile;
-use ral_core::shell::runtime::{Break, Escape, Mooring, ValClos, View};
+use ral_core::shell::runtime::{Break, Escape, Mooring};
 use ral_core::source::{SourceFile, SourceOrigin};
+use ral_core::{VClosRef, ValClos, View};
 
 pub(crate) const CONFIG_FILE: &str = "config.ral";
 
@@ -202,13 +203,18 @@ fn decode(value: &ValClos, display: &str, label: &str) -> Result<Vec<Service>, S
         ));
     };
     let mut services = Vec::with_capacity(map.len());
-    for (name, decl) in map {
-        services.push(decode_one(name, &decl, display, label)?);
+    for (name, decl) in map.iter() {
+        services.push(decode_one(name, decl, display, label)?);
     }
     Ok(services)
 }
 
-fn decode_one(name: &str, decl: &ValClos, display: &str, label: &str) -> Result<Service, String> {
+fn decode_one(
+    name: &str,
+    decl: VClosRef<'_>,
+    display: &str,
+    label: &str,
+) -> Result<Service, String> {
     let where_ = format!("{label} {display}: provider '{name}'");
     let View::Map(fields) = decl.view() else {
         return Err(format!(
@@ -223,8 +229,8 @@ fn decode_one(name: &str, decl: &ValClos, display: &str, label: &str) -> Result<
             ));
         }
     }
-    let endpoint = string_field(fields.get("endpoint").as_deref(), "endpoint", &where_)?;
-    let protocol = string_field(fields.get("protocol").as_deref(), "protocol", &where_)?;
+    let endpoint = string_field(fields.get("endpoint"), "endpoint", &where_)?;
+    let protocol = string_field(fields.get("protocol"), "protocol", &where_)?;
 
     let name = ServiceName::declared(name).map_err(|e| format!("{label} {display}: {e}"))?;
     if built_in(&name).is_some() {
@@ -233,12 +239,11 @@ fn decode_one(name: &str, decl: &ValClos, display: &str, label: &str) -> Result<
              provider cannot reuse its name."
         ));
     }
-    let auth = match fields.get("key").as_deref().map(ValClos::view) {
+    let auth = match fields.get("key").map(VClosRef::view) {
         None => Auth::Key(key_var(&name)),
-        Some(View::Variant {
-            label,
-            payload: None,
-        }) if &**label == "none" => Auth::Keyless,
+        Some(View::Variant { label, payload }) if &**label == "none" && payload.is_unit() => {
+            Auth::Keyless
+        }
         // Never echoed: what was written may be the key itself.
         Some(_) => {
             return Err(format!(
@@ -258,7 +263,7 @@ fn decode_one(name: &str, decl: &ValClos, display: &str, label: &str) -> Result<
     ))
 }
 
-fn string_field(value: Option<&ValClos>, field: &str, where_: &str) -> Result<String, String> {
+fn string_field(value: Option<VClosRef<'_>>, field: &str, where_: &str) -> Result<String, String> {
     match value {
         Some(value) => match value.view() {
             View::String(s) => Ok(s.to_string()),

@@ -14,13 +14,11 @@
 use crate::authority::policy::FsOp;
 use crate::fact::{IoOperation, IoSubject, Read, Write};
 use crate::io::{IoPatch, Sink, Source, SourceReader};
-use crate::ir::{Redirects, StderrTarget, StdinSource, WriteMode};
+use crate::ir::{Redirects, StderrTarget, StdinSource, ValClos, WriteMode};
 use crate::path::{
     Kind, Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing, open_discard,
 };
-use crate::shell::runtime::{
-    Bytes, Error, Mooring, Observed, Settled, Shell, ValClos, WriteOutcome,
-};
+use crate::shell::runtime::{Bytes, Error, Mooring, Observed, Settled, Shell, WriteOutcome};
 use crate::source::Span;
 use crate::text::quote_native;
 use std::ffi::OsStr;
