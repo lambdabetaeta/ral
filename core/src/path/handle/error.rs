@@ -154,7 +154,7 @@ pub(crate) fn directory_refused(e: &io::Error) -> bool {
         .is_some_and(<dyn std::error::Error + Send + Sync>::is::<DirectoryRefused>)
 }
 
-/// The error [`Located::stage`](super::held::Located::stage) returns where the
+/// The error [`Located::stage`](super::object::Located::stage) returns where the
 /// sibling's create is refused, built as it builds it, for the tests that
 /// render it where no directory can be made unwritable (root writes every
 /// directory).

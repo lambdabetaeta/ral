@@ -6,7 +6,7 @@ use crate::compile::{CompileError, UseRefusal, compile_and_typecheck};
 use crate::error::Prov;
 use crate::fact::{InvalidCause, InvalidFailure, IoOperation, IoSubject, Reason};
 use crate::ir::{Env, Module, Toplevel, ValClos};
-use crate::path::{Judged, LeafMode, Located, Reading, walk_lenient};
+use crate::path::{LeafMode, Located, Reading, walk_lenient};
 use crate::shell::evaluator::{Mode, Ran, run_phrases};
 use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::source::{FileId, Source, SourceFile, SourceOrigin, Span};
@@ -160,10 +160,7 @@ pub(crate) fn load_module(
     Ok(Arc::new(Module { top, origin }))
 }
 
-fn read_and_normalize(
-    located: Located<Judged<Reading>>,
-    path: &Path,
-) -> Result<String, UseRefusal> {
+fn read_and_normalize(located: Located<Reading>, path: &Path) -> Result<String, UseRefusal> {
     let read = located.read();
     drop(located);
     let refusal = |operation, error: std::io::Error| UseRefusal::Read {

@@ -5,14 +5,14 @@
 
 use crate::authority::policy::ReadRegion;
 use crate::path::tree::Walk;
-use crate::path::{Dir, Judged, Kind, LeafMode, Reading, walk_dir};
+use crate::path::{Dir, Kind, LeafMode, Reading, walk_dir};
 use crate::protocol::probe::PathEntry;
 use crate::shell::runtime::Shell;
 use std::path::Path;
 
 /// `dir` held and judged for reading, with the region that judges what is
 /// beneath it; `None` where it cannot be entered or read.
-fn open(shell: &Shell, dir: &Path) -> Option<(ReadRegion, Dir<Judged<Reading>>)> {
+fn open(shell: &Shell, dir: &Path) -> Option<(ReadRegion, Dir<Reading>)> {
     let entered = walk_dir(&shell.anchor(dir)).ok()?;
     let judged = (shell.context.grants)
         .judge::<Reading, _>(shell.baseline(), entered)

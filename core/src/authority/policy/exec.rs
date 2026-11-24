@@ -15,8 +15,8 @@ use super::table::{Allows, Denies, Table, Withheld};
 use super::{GrantStack, Join, Meet};
 use crate::authority::grant::value::{ExecTable, Target};
 use crate::path::{
-    self, Authority, Depth, Excluded, FrozenPath, Judged, Located, MatchedBy, Reading, RealPath,
-    Trace, Unjudged, command_name_key,
+    self, Authority, Depth, Excluded, FrozenPath, Located, MatchedBy, Reading, RealPath, Trace,
+    Unjudged, command_name_key,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -30,15 +30,15 @@ use std::path::PathBuf;
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Admitted {
-    program: Program<Judged<Reading>>,
+    program: Program<Reading>,
 }
 
 impl Admitted {
-    pub(crate) fn program(&self) -> &Program<Judged<Reading>> {
+    pub(crate) fn program(&self) -> &Program<Reading> {
         &self.program
     }
 
-    pub(in crate::authority) fn into_program(self) -> Program<Judged<Reading>> {
+    pub(in crate::authority) fn into_program(self) -> Program<Reading> {
         self.program
     }
 }

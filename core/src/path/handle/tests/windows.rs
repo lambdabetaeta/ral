@@ -3,7 +3,7 @@
 use super::super::super::names::{EntryName, rooted};
 use super::super::super::trace::{Kind, ObjectId};
 use super::super::resolve::{LeafMode, walk, walk_dir, walk_dir_made, walk_excluded, walk_lenient};
-use super::super::{Access, Dir, Judged, Located, Sharing, Streaming, Visibility, Writing, host};
+use super::super::{Access, Dir, Located, Sharing, Streaming, Visibility, Writing, host};
 use super::{named, writable, writing};
 use crate::environ::EnvVars;
 use crate::path::{LexicalPath, Resolver};
@@ -38,11 +38,11 @@ fn spelled(path: &Path) -> LexicalPath {
 
 /// `path` walked, and the directory `path` entered, as these tests hold
 /// them: retagged as judged for writing, since the tests judge nothing.
-fn walked(path: &Path) -> Located<Judged<Writing>> {
+fn walked(path: &Path) -> Located<Writing> {
     writing(walk(&spelled(path), LeafMode::Follow).unwrap())
 }
 
-fn entered(path: &Path) -> Dir<Judged<Writing>> {
+fn entered(path: &Path) -> Dir<Writing> {
     writable(walk_dir(&spelled(path)).unwrap())
 }
 

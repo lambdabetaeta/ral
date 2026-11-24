@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ed1b37eb
-generated_at_date: 2026-11-12
+generated_at_commit: ed288c17
+generated_at_date: 2026-11-24
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/load/profile.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -82,7 +82,7 @@ Submodules:
   objects. `GrantStack::judge` and `locate`, each one function over the sealed
   `path::Handle` (`Located` or `Dir`), are where the stack's evidence becomes
   authority: the pinned-binary veto (`Refused::Guarded`) first, then
-  the fold, then the handle `Judged<O>`, minted by `Handle::judged` against a
+  the fold, then the handle marked `O`, minted by `Handle::judged` against a
   `Verdict` only this file makes, as `ReadRegion::judge` and `Ungoverned::{read,
   write}` mint too; `GrantStack::read` is the read
   judgment, `region(Read)` alone;
@@ -94,7 +94,7 @@ Submodules:
   Table<ExecAllow, ExecDeny>`; `rules`, the stack's table; `places`, the run
   places. Authored exec targets are resolved by `authority::grant`, not here;
   `GrantStack::admit(baseline, program)` judges the table then reading and is
-  the only mint of `Admitted` (`Program<Judged<Reading>>`, a private
+  the only mint of `Admitted` (`Program<Reading>`, a private
   field); a refusal is data, `ExecDenial::{Run(Withheld<ExecDeny>),
   Read(Withheld<FsDeny>)}`, the refused program dropped;
   `admit` reads through `read_region(baseline)` and vouches for a file through
@@ -339,9 +339,9 @@ are named through them and re-exported nowhere.
   it, is the walk's to say;
 - locate — `handle.rs` exports one resolver from `handle/`: `names.rs` validates
   spellings, `trace.rs` holds evidence, and `exclusion.rs` keeps deny anchors.
-  `held.rs` owns private handles and authority conversions; operations in
-  `held/`, traversal in `resolve.rs`, and host adapters are its child modules.
-  `held/write.rs::create_scoped_dir` creates a secret directory through a
+  `object.rs` owns private handles and authority conversions; operations in
+  `object/`, traversal in `resolve.rs`, and host adapters are its child modules.
+  `object/write.rs::create_scoped_dir` creates a secret directory through a
   write-judged absent target; `ScopedDir` holds it and permits only empty-root
   rollback on drop. Recursive cleanup requires a fresh write judgment of
   `cleanup_target`, the actual held tree, not its original absent name.
@@ -381,7 +381,7 @@ are named through them and re-exported nowhere.
   `walk_dir`, `walk_lenient` (a grant spelling's transcript, as far as the disk
   goes), `walk_excluded` (an exclusion's `Excluded`, the link and its target
   held) and `open_discard` are the other entries; `Dir`, `Located` and `Hold` are
-  the three holders and `Unjudged`, `Judged<O>` and `Installing` who vouched
+  the three holders and `Unjudged`, `Reading`, `Writing` and `Installing` who vouched
   ([[internals/path-judgment|path-judgment]]);
 - match — `identity.rs`: `RealPath::contains`, an allowance by position, names
   as stored (on Windows `windows_stored_components`, preserving stored case and

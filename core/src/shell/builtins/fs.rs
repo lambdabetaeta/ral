@@ -12,7 +12,7 @@ use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{InvalidCause, IoOperation, IoSubject, PathFailure, PathFailureGlob};
 use crate::ir::ValClos;
 use crate::path::{
-    Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
+    Dir, EntryName, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
 use crate::shell::exec::command::would_run;
 use crate::shell::runtime::invalid;
@@ -53,7 +53,7 @@ pub(super) fn builtin_list_dir(args: &[ValClos], shell: &mut Shell) -> Settled<V
 /// Refused, before anything is created, unless its real path is UTF-8: the
 /// entry is kept and handed back as a string, which a name no string holds
 /// would leave naming some other path, and the entry itself unreachable.
-fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Judged<Writing>>> {
+fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Writing>> {
     let rp = shell.anchor(&crate::host::temp_dir());
     let dir = shell.locate_dir::<Writing>(&rp)?;
     crate::path::utf8(dir.real().as_path())
@@ -69,8 +69,8 @@ fn made_in(
     ctx: &str,
     operation: IoOperation,
     shell: &mut Shell,
-    parent: &Dir<Judged<Writing>>,
-    make: impl Fn(Located<Judged<Writing>>) -> io::Result<String>,
+    parent: &Dir<Writing>,
+    make: impl Fn(Located<Writing>) -> io::Result<String>,
 ) -> Settled<ValClos> {
     loop {
         let name = EntryName::fresh("ral-tmp-").map_err(|e| {
@@ -122,7 +122,7 @@ pub(super) fn builtin_temp_file(
     temp_file_in(shell, &parent)
 }
 
-fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<ValClos> {
+fn temp_dir_in(shell: &mut Shell, parent: &Dir<Writing>) -> Settled<ValClos> {
     made_in(
         "temp-dir",
         IoOperation::CreateDirectory,
@@ -136,7 +136,7 @@ fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<ValC
     )
 }
 
-fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<ValClos> {
+fn temp_file_in(shell: &mut Shell, parent: &Dir<Writing>) -> Settled<ValClos> {
     made_in(
         "temp-file",
         IoOperation::CreateFile,
@@ -257,7 +257,7 @@ fn fs_probe(
     args: &[ValClos],
     shell: &mut Shell,
     leaf: LeafMode,
-    probe: impl FnOnce(&Located<Judged<Reading>>) -> bool,
+    probe: impl FnOnce(&Located<Reading>) -> bool,
 ) -> Settled<ValClos> {
     let rp = shell.resolve(args[0].as_str(name)?);
     let held = shell.locate_existing::<Reading>(&rp, leaf)?;
@@ -265,7 +265,7 @@ fn fs_probe(
 }
 
 /// A predicate on the kind the probe stated.
-fn is_kind(kind: Kind) -> impl FnOnce(&Located<Judged<Reading>>) -> bool {
+fn is_kind(kind: Kind) -> impl FnOnce(&Located<Reading>) -> bool {
     move |located| located.stat().is_some_and(|stat| stat.kind == kind)
 }
 

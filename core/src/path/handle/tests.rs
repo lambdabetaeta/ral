@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use super::{Dir, Judged, Located, Writing};
+use super::{Dir, Located, Writing};
 use crate::path::{Excluded, Trace};
 
 /// Where `walk_excluded` stands around its read of a held link's target.
@@ -63,15 +63,15 @@ pub(super) fn after_scoped_mkdir() {
 /// What these tests hold: the walk's own handles, which judge nothing, so the
 /// tests retag them with a door only this module has.  The grant's own door,
 /// and what it refuses, are `authority/policy/fs.rs`'s to test.
-pub(super) fn writing(l: Located) -> Located<Judged<Writing>> {
+pub(super) fn writing(l: Located) -> Located<Writing> {
     l.marked()
 }
 
-pub(super) fn writable(d: Dir) -> Dir<Judged<Writing>> {
+pub(super) fn writable(d: Dir) -> Dir<Writing> {
     d.marked()
 }
 
-pub(super) fn remove_tree(l: Located<Judged<Writing>>) -> std::io::Result<()> {
+pub(super) fn remove_tree(l: Located<Writing>) -> std::io::Result<()> {
     l.remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)))
         .map(|res| match res {
             Ok(()) => (),

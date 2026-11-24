@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f9ac94f8
-verified_at_date: 2026-11-12
-anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
+verified_at_commit: ed288c17
+verified_at_date: 2026-11-24
+anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Vouched, Reading, Writing, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -78,19 +78,24 @@ vouched for it.**
   operations that end an object's use take it by value (`stage`, `create_dir`,
   `launch`, `open_write`). Nothing holds a handle longer than the operation
   it was walked for.
-- **The marker is the voucher.** `Unjudged` is what the walk returns and offers
-  its trace and nothing more. `Judged<Reading>` and `Judged<Writing>` are minted
-  by `Handle::judged` alone, against a `Verdict` only `authority/policy/fs.rs`
-  makes. `Handle` is the sealed trait over the two handle kinds, `Located` and
-  `Dir`: its kind's walk, its trace and that mint. So each fs door is one
-  function over both kinds: `GrantStack::judge` and `GrantStack::locate` for
-  the stack, `ReadRegion::judge` for a walk that judges many objects against
-  one fold, and `Ungoverned::read` and its crate-private `write` for the user's
-  own authority, banned by clippy outside typed sites. `Installing` is minted by the two
-  `RealPath::open_*_nofollow` against an `InstallToken` only `authority::sandbox` can
-  make. Bytes come out of a judged handle only, and go in through a write-judged
-  one only; a stat or a link's target needs a judged or installing one. A
-  descent keeps its authority (`Installing` to `Installing`; `Judged` to
+- **The marker is the voucher.** Four flat markers — `Unjudged`, `Reading`,
+  `Writing`, and crate-private `Installing` — sit in one sealed chain,
+  `Authority` ← `Vouched` ← `Op`, with marker minting confined to `mod stamp`.
+  `Unjudged` is what the walk returns and offers its trace and nothing more.
+  `Reading` and `Writing` (the `Op`s) are minted by `Handle::judged` alone,
+  against a `Verdict` only `authority/policy/fs.rs` makes. `Handle` is the
+  sealed trait over the two handle kinds, `Located` and `Dir`: its kind's walk,
+  its trace and that mint. So each fs door is one function over both kinds:
+  `GrantStack::judge` and `GrantStack::locate` for the stack,
+  `ReadRegion::judge` for a walk that judges many objects against one fold, and
+  `Ungoverned::read` and its crate-private `write` for the user's own
+  authority, banned by clippy outside typed sites. `Installing` is minted by
+  the two `RealPath::open_*_nofollow` against an `InstallToken` only
+  `authority::sandbox` can make. `Vouched` (`Reading`, `Writing`, `Installing`)
+  permits stat, link targets, listings and descent; `Op` (`Reading`, `Writing`)
+  permits reading bytes; writes live on `Writing` alone, where `remove` is
+  single-entry and `remove_all` judges every descendant. A descent keeps its
+  authority (`Installing` to `Installing`; `Reading` and `Writing` to
   `Unjudged`, which the region judges again). So `walk(p)?.read()` does not
   compile, in this crate or another.
 

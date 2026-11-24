@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-verified_at_date: 2026-10-25
+verified_at_commit: ed288c17
+verified_at_date: 2026-11-24
 anchors: [Trace, RealPath, Hold, Excluded, Dir, Located, walk, walk_excluded, GrantLayer, GrantPath, Extent, GrantStack::judge, rehold, Walk, AdmittedWalk, Shell::admitted_walk]
 ---
 
@@ -40,7 +40,7 @@ its authored form beside its resolution, and the two could disagree.
 - **Four roles, four types.** A `Trace` is evidence; a `Hold` is an anchor (a
   trace plus a handle, on the wire the trace alone, re-held on arrival); `Dir`
   and `Located` are possession; a `Listed` is what a listing saw. The handle's
-  type says who vouched (`Unjudged`, `Judged<Reading>`, `Judged<Writing>`,
+  type says who vouched (`Unjudged`, `Reading`, `Writing`,
   `Installing`), each minted at one door, so `walk(p)?.read()` does not compile.
 - **Two readings, one per polarity.** An allowance holds by position
   (`RealPath::contains`), which is transitive and survives a directory removed

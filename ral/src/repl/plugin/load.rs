@@ -14,7 +14,7 @@ use ral_core::fact::{
     PluginFailure, PluginFailureAlreadyLoaded, PluginFailureHandlerInstallationEscaped,
     PluginFailureNotFound, PluginFailureOptionsWithoutFactory, Reason, StateFailure,
 };
-use ral_core::path::{EntryName, Judged, Kind, Located, Reading};
+use ral_core::path::{EntryName, Kind, Located, Reading};
 use ral_core::shell::runtime::{
     Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Mooring, Settled,
 };
@@ -26,7 +26,7 @@ use super::manifest::{self, HookEvent, ManifestHandlers};
 
 /// The plugin's source, read through the judged handle, which ends here:
 /// nothing of the load after the read holds the file or its directory.
-fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String)> {
+fn read_source(located: Located<Reading>) -> Settled<(SourceFile, String)> {
     let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(|e| {
         Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
             "load-plugin".into(),
@@ -229,7 +229,7 @@ fn instantiate(
 /// # Errors
 /// The grant's refusal, a walk failure, a nonregular plugin candidate,
 /// or `not found` naming that one path.
-fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located<Judged<Reading>>> {
+fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located<Reading>> {
     let candidate = if name_or_path.contains(std::path::is_separator) {
         shell.resolve(name_or_path)
     } else {

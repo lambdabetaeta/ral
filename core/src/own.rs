@@ -40,8 +40,8 @@ use crate::authority::policy::Ungoverned;
 use crate::environ::EnvVars;
 use crate::host;
 use crate::path::{
-    Access, Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading,
-    RealPath, Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,
+    Access, Dir, EntryName, Handle, Kind, LeafMode, LexicalPath, Located, Reading, RealPath,
+    Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,
     spelled_parent, sync_dir, sync_dir_chain, unsynced, walk, walk_dir, walk_dir_made,
     walk_dir_made_synced,
 };
@@ -69,12 +69,12 @@ thread_local! {
 // ── The minting points ────────────────────────────────────────────────
 
 /// `l`, vouched for as the user's own, for reading.
-fn reading(l: Located) -> Located<Judged<Reading>> {
+fn reading(l: Located) -> Located<Reading> {
     site!(Silent::Read, Ungoverned::read(l))
 }
 
 /// `h`, vouched for as the user's own, for writing.
-fn writing<H: Handle>(h: H) -> H::As<Judged<Writing>> {
+fn writing<H: Handle>(h: H) -> H::As<Writing> {
     site!(Silent::Write, Ungoverned::write(h))
 }
 
@@ -355,7 +355,7 @@ fn anchored(path: &Path) -> Result<LexicalPath, OwnError> {
 
 /// The directory `spelling` names, held, each absent name of it made
 /// owner-only first; `at` is how errors name it.
-fn made(spelling: &LexicalPath, at: &Path) -> Result<Dir<Judged<Writing>>, OwnError> {
+fn made(spelling: &LexicalPath, at: &Path) -> Result<Dir<Writing>, OwnError> {
     walk_dir_made(spelling)
         .map(writing)
         .map_err(|e| walked(Act::Make, at, e))
@@ -382,7 +382,7 @@ pub struct OwnDir(Arc<Held>);
 
 /// The handle of an [`OwnDir`] and the spelling it was reached by.
 struct Held {
-    dir: Dir<Judged<Writing>>,
+    dir: Dir<Writing>,
     path: LexicalPath,
 }
 
@@ -394,7 +394,7 @@ pub struct Entry {
 }
 
 impl OwnDir {
-    fn new(dir: Dir<Judged<Writing>>, path: LexicalPath) -> Self {
+    fn new(dir: Dir<Writing>, path: LexicalPath) -> Self {
         Self(Arc::new(Held { dir, path }))
     }
 
@@ -850,7 +850,7 @@ impl OwnDir {
 
     /// The entry `name` as the walk finds it, nothing followed: the object it
     /// is, or the create target it would be.
-    fn find(&self, act: Act, name: &EntryName) -> Result<Located<Judged<Writing>>, OwnError> {
+    fn find(&self, act: Act, name: &EntryName) -> Result<Located<Writing>, OwnError> {
         (self.0.dir.target(name, LeafMode::NoFollow))
             .map(writing)
             .map_err(|e| self.failed(act, name, e))
@@ -864,7 +864,7 @@ impl OwnDir {
 
     /// [`find`](Self::find), refusing a link: where the program keeps a file
     /// of its own, it is written through none.
-    fn unlinked(&self, act: Act, name: &EntryName) -> Result<Located<Judged<Writing>>, OwnError> {
+    fn unlinked(&self, act: Act, name: &EntryName) -> Result<Located<Writing>, OwnError> {
         let found = self.find(act, name)?;
         if found.trace().kind() == Some(Kind::Symlink) {
             return Err(OwnError::Linked(self.at(name)));
@@ -1075,7 +1075,7 @@ impl UserFile {
 
     /// The directory the file sits in, made where absent and held, and the
     /// file's name in it.
-    fn placed(&self) -> Result<(Dir<Judged<Writing>>, EntryName), OwnError> {
+    fn placed(&self) -> Result<(Dir<Writing>, EntryName), OwnError> {
         let spelling = anchored(&self.path)?;
         let (Some(dir), Some(name)) = (
             spelled_parent(spelling.as_path()).and_then(LexicalPath::absolute),

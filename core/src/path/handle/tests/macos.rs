@@ -3,7 +3,7 @@
 
 use super::super::super::trace::{Kind, ObjectId, RealPath};
 use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
-use super::super::{Held, Judged, Leaf, Located, Sharing, Streaming, Visibility, Writing, host};
+use super::super::{Held, Leaf, Located, Sharing, Streaming, Visibility, Writing, host};
 use super::unix::{id, located_with, name, root, root_user, spelled};
 use super::{LOOKED, named};
 use std::ffi::OsStr;
@@ -572,7 +572,7 @@ fn a_special_file_is_stated_and_never_held() {
     let dir = root(&tmp);
     let derived = || host::DERIVED.with(std::cell::Cell::get);
     let before = derived();
-    let stated = |loc: &Located<Judged<Writing>>| matches!(&loc.leaf, Leaf::Stated { stat, .. } if stat.kind == Kind::Other);
+    let stated = |loc: &Located<Writing>| matches!(&loc.leaf, Leaf::Stated { stat, .. } if stat.kind == Kind::Other);
 
     mkfifo(&dir.join("pipe"));
     let loc = located_with(&dir.join("pipe"), LeafMode::Follow).unwrap();

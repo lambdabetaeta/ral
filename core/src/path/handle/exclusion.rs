@@ -5,9 +5,9 @@ use std::io;
 #[cfg(unix)]
 use std::sync::Arc;
 
-use super::held::resolve::{LeafMode, walk_excluded, walk_lenient};
+use super::object::resolve::{LeafMode, walk_excluded, walk_lenient};
 #[cfg(unix)]
-use super::held::resolve::{Links, Mode, OnMissing, finish};
+use super::object::resolve::{Links, Mode, OnMissing, finish};
 #[cfg(unix)]
 use super::trace::ObjectId;
 use super::trace::Trace;
@@ -76,7 +76,7 @@ impl Hold {
     /// Walk the kernel's current name, verify identity, then append the tail.
     #[cfg(unix)]
     pub(crate) fn current(&self) -> Option<RealPath> {
-        let name = super::held::current_path(self.handle.as_deref()?).ok()?;
+        let name = super::object::current_path(self.handle.as_deref()?).ok()?;
         let found = finish(
             &name,
             Mode::NoFollow,

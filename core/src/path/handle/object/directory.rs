@@ -3,7 +3,6 @@
 #[cfg(windows)]
 use std::fs::File;
 use std::io;
-use std::marker::PhantomData;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::Arc;
@@ -11,16 +10,10 @@ use std::sync::Arc;
 #[cfg(any(target_os = "linux", windows))]
 use super::Installing;
 use super::{
-    Dir, DirEntry, EntryName, Kind, Leaf, LeafMode, Listed, Listing, Lists, Located, Node, Peeks,
-    RealPath, Seen, Sharing, Stat, Step, Trace, host, step_into,
+    Dir, DirEntry, EntryName, Kind, Leaf, LeafMode, Listed, Listing, Located, Node, RealPath, Seen,
+    Sharing, Stamp, Stat, Step, Trace, Vouched, host, step_into,
 };
 use crate::text::quote_native;
-
-impl<A: Peeks> Dir<A> {
-    pub(crate) fn stat(&self) -> &Stat {
-        &self.stat
-    }
-}
 
 /// The bwrap handoff and Landlock lend the handle, never a name.
 /// `Installing` alone: an `O_PATH` directory descriptor opens children,
@@ -45,7 +38,11 @@ impl Dir<Installing> {
     }
 }
 
-impl<A: Lists> Dir<A> {
+impl<A: Vouched> Dir<A> {
+    pub(crate) fn stat(&self) -> &Stat {
+        &self.stat
+    }
+
     /// The entries of this directory from the held handle, in name order,
     /// each stated as it is yielded, nothing followed: the names are read
     /// first, from a handle reopened for listing, then each is stated as the
@@ -67,7 +64,7 @@ impl<A: Lists> Dir<A> {
     /// Open the entry `name` as a directory: one step with directory
     /// sharing.  A link or a non-directory at `name` is an error.  The one
     /// child-descent primitive, keeping its authority or losing it as
-    /// [`Lists::Child`] says.
+    /// [`Vouched::Child`] says.
     ///
     /// # Errors
     /// The open's; `NotADirectory` for a link or anything else but a directory.
@@ -83,7 +80,7 @@ impl<A: Lists> Dir<A> {
                     }),
                     trace: self.trace.extended([step], Vec::new()),
                     stat,
-                    _a: PhantomData,
+                    stamp: Stamp::child(&self.stamp),
                 })
             }
             Kind::Symlink => Err(io::Error::new(

@@ -71,6 +71,8 @@ pub use basedir::{XdgKind, app_dir};
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use canon::twins;
 pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) use handle::Installing;
 #[cfg(test)]
 pub(crate) use handle::directory_refusal_for_test;
 #[cfg(any(test, feature = "test-util"))]
@@ -80,10 +82,9 @@ pub(crate) use handle::{
     open_discard, sync_dir, sync_dir_chain, unsynced, walk_dir_made, walk_dir_made_synced,
 };
 pub use handle::{
-    Authority, Dir, DirEntry, EntryName, Excluded, Handle, Hold, Installing, Judged, Kind,
-    LeafMode, Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads,
-    RealPath, RootName, ScopedDir, Stat, Step, Trace, Unjudged, Visibility, Walked, Writing,
-    exists, kind_of, walk, walk_dir, walk_lenient,
+    Authority, Dir, DirEntry, EntryName, Excluded, Handle, Hold, Kind, LeafMode, Listing, Located,
+    NotAnEntryName, ObjectId, Op, Reading, RealPath, RootName, ScopedDir, Stat, Step, Trace,
+    Unjudged, Visibility, Vouched, Walked, Writing, exists, kind_of, walk, walk_dir, walk_lenient,
 };
 #[cfg(unix)]
 pub(crate) use handle::{Vetted, walk_with};

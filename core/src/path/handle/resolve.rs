@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
-use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,8 +17,8 @@ use super::Installing;
 #[cfg(test)]
 use super::tests;
 use super::{
-    Authority, Child, Dir, Held, Leaf, Lists, Located, Node, Sharing, Visibility, counted, host,
-    step_into,
+    Authority, Child, Dir, Held, Leaf, Located, Node, Sharing, Stamp, Visibility, Vouched, counted,
+    host, step_into,
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::authority::sandbox::InstallToken;
@@ -128,7 +127,7 @@ impl RealPath {
     #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn open_nofollow(
         &self,
-        _: &InstallToken,
+        token: &InstallToken,
     ) -> io::Result<Option<Located<Installing>>> {
         use io::ErrorKind::{NotADirectory, NotFound};
         match finish(
@@ -138,7 +137,9 @@ impl RealPath {
             Links::Refuse,
             |_| true,
         ) {
-            Ok(located) if located.observed().is_some() => Ok(Some(located.marked())),
+            Ok(located) if located.observed().is_some() => {
+                Ok(Some(located.restamp(Stamp::installing(token))))
+            }
             Ok(_) => Ok(None),
             Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(None),
             Err(e) => Err(e),
@@ -154,7 +155,7 @@ impl RealPath {
     #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn open_dir_nofollow(
         &self,
-        _: &InstallToken,
+        token: &InstallToken,
     ) -> io::Result<Option<Dir<Installing>>> {
         use io::ErrorKind::{NotADirectory, NotFound};
         match finish(
@@ -164,14 +165,17 @@ impl RealPath {
             Links::Refuse,
             |_| true,
         ) {
-            Ok(located) => Ok(located.into_dir().ok().map(Dir::marked)),
+            Ok(located) => Ok(located
+                .into_dir()
+                .ok()
+                .map(|dir| dir.restamp(Stamp::installing(token)))),
             Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(None),
             Err(e) => Err(e),
         }
     }
 }
 
-impl<A: Lists> Dir<A> {
+impl<A: Vouched> Dir<A> {
     /// The entry `name` as the object it is or, where nothing is there, the
     /// create target it would be: under [`LeafMode::Follow`], through a link
     /// at `name`, the target's, with [`Located::linked_to`] saying where the
@@ -191,7 +195,9 @@ impl<A: Lists> Dir<A> {
             Links::Splice,
             |_| true,
         );
-        walker.run().map(Located::marked)
+        walker
+            .run()
+            .map(|located| located.restamp(Stamp::child(&self.stamp)))
     }
 
     /// Follow the link entry `name` to the directory it names: the link is
@@ -227,7 +233,7 @@ impl<A: Lists> Dir<A> {
             .run()?
             .into_dir()
             .map_err(|_| io::Error::from(io::ErrorKind::NotADirectory))?;
-        Ok(dir.marked())
+        Ok(dir.restamp(Stamp::child(&self.stamp)))
     }
 }
 
@@ -564,7 +570,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             trace,
             leaf,
             linked: self.linked,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         }
     }
 
@@ -580,7 +586,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 stat,
             },
             linked: self.linked,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         })
     }
 
@@ -641,7 +647,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 dir: self.cursor.into_top(),
             },
             linked: self.linked,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         }
     }
 }

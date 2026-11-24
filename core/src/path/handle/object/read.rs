@@ -7,8 +7,8 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 
 use super::{
-    Access, Authority, Data, Installing, Kind, Leaf, Located, ObjectId, Peeks, Reads, Stat,
-    Visibility, host,
+    Access, Authority, Data, Installing, Kind, Leaf, Located, ObjectId, Op, Stat, Visibility,
+    Vouched, host,
 };
 
 impl ObjectId {
@@ -33,7 +33,7 @@ impl<A: Authority> Located<A> {
     }
 }
 
-impl<A: Peeks> Located<A> {
+impl<A: Vouched> Located<A> {
     /// `None` when the leaf is absent.  No syscall: taken at the walk.
     pub fn stat(&self) -> Option<&Stat> {
         self.observed()
@@ -110,7 +110,7 @@ impl Located<Installing> {
     }
 }
 
-impl<A: Reads> Located<A> {
+impl<O: Op> Located<O> {
     /// A data handle on the leaf.  Held: derived from the held handle where
     /// the host can, else opened by name under `dir` and verified.  A special
     /// file (macOS): opened by name under `dir` and verified against the

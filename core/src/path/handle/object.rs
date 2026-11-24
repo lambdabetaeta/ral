@@ -7,7 +7,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -137,77 +136,119 @@ mod private {
 
 /// Who vouched for a held handle, and so what may be done through it.
 ///
-/// [`Unjudged`]: nobody, what the walk returns.  [`Judged<O>`]: an fs door,
-/// for the op `O`; made by [`Handle::judged`] against a [`Verdict<O>`], whose
-/// field is private to `authority/policy/fs.rs`.
-/// [`Installing`]: the OS sandbox side, at a position it is installing rules
-/// at; made by the two `RealPath::open_*_nofollow` against an
-/// `InstallToken`, whose field is private to `sandbox.rs`.  What a holder
-/// may do is a trait on its marker: [`Peeks`] (metadata), [`Lists`]
-/// (enumerate and descend), [`Reads`] (bytes out), and writes on
-/// `Judged<Writing>` alone.  Sealed.
+/// [`Unjudged`]: nobody, what the walk returns.  [`Reading`] and [`Writing`]:
+/// an fs door, made by [`Handle::judged`] against a [`Verdict`], whose field is
+/// private to `authority/policy/fs.rs`.  [`Installing`]: the OS sandbox side,
+/// at a position it is installing rules at; made by the two
+/// `RealPath::open_*_nofollow` against an `InstallToken`, whose field is
+/// private to `sandbox.rs`.  Capabilities form a linear chain: [`Authority`] ->
+/// [`Vouched`] (metadata, listing, descent) -> [`Op`] (reads) -> [`Writing`]
+/// (writes).  Sealed.
 pub trait Authority: private::Sealed {}
 
 /// Nobody has vouched: what the walk returns.
 pub enum Unjudged {}
 
-/// The grant stack vouched, for the op `O`.
-pub struct Judged<O: Op>(PhantomData<O>);
+/// The grant stack vouched for reading.
+pub enum Reading {}
+
+/// The grant stack vouched for writing (which includes reading).
+pub enum Writing {}
 
 /// The OS sandbox side holds it, at a position it is installing rules at.
-pub enum Installing {}
+pub(crate) enum Installing {}
 
 impl private::Sealed for Unjudged {}
-impl<O: Op> private::Sealed for Judged<O> {}
+impl private::Sealed for Reading {}
+impl private::Sealed for Writing {}
 impl private::Sealed for Installing {}
+
 impl Authority for Unjudged {}
-impl<O: Op> Authority for Judged<O> {}
+impl Authority for Reading {}
+impl Authority for Writing {}
 impl Authority for Installing {}
 
-/// May stat and read a link's target: the grant said so, or the sandbox is
-/// rendering.  `file-info` on a denied name is refused, and a stat is what it
-/// answers with.
-pub trait Peeks: Authority {}
-impl<O: Op> Peeks for Judged<O> {}
-impl Peeks for Installing {}
-
-/// May list a directory and descend.
+/// Vouched for metadata, listing, and descent: either an fs door or the sandbox
+/// installer.
 ///
 /// `Child` is what a descent is marked: the sandbox side keeps its authority,
 /// since it has no judge to ask again and renders a denied tree too; a judged
-/// directory's children are unjudged, and the region judges each on entry.
-pub trait Lists: Peeks {
+/// directory's children are [`Unjudged`], and the caller judges each on entry.
+pub trait Vouched: Authority {
     type Child: Authority;
 }
-impl<O: Op> Lists for Judged<O> {
+
+impl Vouched for Reading {
     type Child = Unjudged;
 }
-impl Lists for Installing {
+impl Vouched for Writing {
+    type Child = Unjudged;
+}
+impl Vouched for Installing {
     type Child = Self;
 }
 
-/// May read bytes: the grant said so.  Writing reads, so every `Judged<O>`.
-pub trait Reads: Peeks {}
-impl<O: Op> Reads for Judged<O> {}
-
 /// The two fs ops as types, so a judgment's op is in the handle's type;
-/// `FS` is the runtime value the fold uses.  `Reading` and `Writing`, not
-/// `Read` and `Write`: those are `std::io`'s traits.  Sealed.
-pub trait Op: private::Sealed {
+/// `FS` is the runtime value the fold uses.
+///
+/// Writing reads, so every `Op` permits reading bytes.  `Reading` and
+/// `Writing`, not `Read` and `Write`: those are `std::io`'s traits.  Sealed.
+pub trait Op: Vouched {
     const FS: FsOp;
 }
 
-pub enum Reading {}
-pub enum Writing {}
-
-impl private::Sealed for Reading {}
-impl private::Sealed for Writing {}
 impl Op for Reading {
     const FS: FsOp = FsOp::Read;
 }
 impl Op for Writing {
     const FS: FsOp = FsOp::Write;
 }
+
+/// Confines authority minting so even submodules of `object` cannot fabricate
+/// an elevated marker without the matching proof token or parent stamp.
+mod stamp {
+    use std::marker::PhantomData;
+
+    #[cfg(any(target_os = "linux", windows))]
+    use super::Installing;
+    use super::{Authority, Op, Unjudged, Verdict, Vouched};
+    #[cfg(any(target_os = "linux", windows))]
+    use crate::authority::sandbox::InstallToken;
+
+    pub(super) struct Stamp<A: Authority>(PhantomData<A>);
+
+    impl Stamp<Unjudged> {
+        pub(super) const fn unjudged() -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<O: Op> Stamp<O> {
+        pub(super) const fn judged(_: Verdict<O>) -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    impl Stamp<Installing> {
+        pub(super) const fn installing(_: &InstallToken) -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<A: Vouched> Stamp<A> {
+        pub(super) const fn child(_: &Self) -> Stamp<A::Child> {
+            Stamp(PhantomData)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn for_test<A: Authority>() -> Stamp<A> {
+        Stamp(PhantomData)
+    }
+}
+
+use stamp::Stamp;
 
 /// A handle the walk returns, unjudged: [`Located`] or [`Dir`].  Each fs door
 /// is written once over the two kinds and mints through
@@ -226,8 +267,8 @@ pub trait Handle: private::Sealed + Sized {
     fn trace(&self) -> &Trace;
 
     /// This handle, vouched for: outside this module, the one way `Unjudged`
-    /// becomes `Judged<O>`.
-    fn judged<O: Op>(self, _: Verdict<O>) -> Self::As<Judged<O>>;
+    /// becomes `O`.
+    fn judged<O: Op>(self, _: Verdict<O>) -> Self::As<O>;
 }
 
 impl private::Sealed for Located {}
@@ -244,8 +285,8 @@ impl Handle for Located {
         &self.trace
     }
 
-    fn judged<O: Op>(self, _: Verdict<O>) -> Located<Judged<O>> {
-        self.marked()
+    fn judged<O: Op>(self, verdict: Verdict<O>) -> Located<O> {
+        self.restamp(Stamp::judged(verdict))
     }
 }
 
@@ -260,8 +301,8 @@ impl Handle for Dir {
         &self.trace
     }
 
-    fn judged<O: Op>(self, _: Verdict<O>) -> Dir<Judged<O>> {
-        self.marked()
+    fn judged<O: Op>(self, verdict: Verdict<O>) -> Dir<O> {
+        self.restamp(Stamp::judged(verdict))
     }
 }
 
@@ -348,7 +389,7 @@ pub struct Dir<A: Authority = Unjudged> {
     node: Arc<Node>,
     trace: Trace,
     stat: Stat,
-    _a: PhantomData<A>,
+    stamp: Stamp<A>,
 }
 
 impl<A: Authority> Dir<A> {
@@ -368,18 +409,23 @@ impl<A: Authority> Dir<A> {
                 stat: self.stat,
             },
             linked: None,
-            _a: PhantomData,
+            stamp: self.stamp,
         }
     }
 
-    /// The same directory under another marker: this module's own step.
-    fn marked<B: Authority>(self) -> Dir<B> {
+    /// The same directory under another authority stamp.
+    fn restamp<B: Authority>(self, stamp: Stamp<B>) -> Dir<B> {
         Dir {
             node: self.node,
             trace: self.trace,
             stat: self.stat,
-            _a: PhantomData,
+            stamp,
         }
+    }
+
+    #[cfg(test)]
+    fn marked<B: Authority>(self) -> Dir<B> {
+        self.restamp(stamp::for_test())
     }
 }
 
@@ -422,7 +468,7 @@ pub struct Located<A: Authority = Unjudged> {
     trace: Trace,
     leaf: Leaf,
     linked: Option<PathBuf>,
-    _a: PhantomData<A>,
+    stamp: Stamp<A>,
 }
 
 /// What the walk has of the leaf.  Host-neutral in the type; only the macOS
@@ -478,14 +524,19 @@ impl<A: Authority> Located<A> {
         self.linked.as_deref()
     }
 
-    /// The same object under another marker: this module's own step.
-    fn marked<B: Authority>(self) -> Located<B> {
+    /// The same object under another authority stamp.
+    fn restamp<B: Authority>(self, stamp: Stamp<B>) -> Located<B> {
         Located {
             trace: self.trace,
             leaf: self.leaf,
             linked: self.linked,
-            _a: PhantomData,
+            stamp,
         }
+    }
+
+    #[cfg(test)]
+    fn marked<B: Authority>(self) -> Located<B> {
+        self.restamp(stamp::for_test())
     }
 
     /// What the walk stated of the leaf, for this module's own use: `None` when
@@ -623,7 +674,7 @@ impl<A: Authority> Located<A> {
                 node,
                 trace: self.trace,
                 stat,
-                _a: PhantomData,
+                stamp: self.stamp,
             }),
             leaf => Err(Self { leaf, ..self }),
         }
@@ -652,7 +703,7 @@ pub(crate) struct Streamed {
 /// ACLs fall to kernel inheritance.
 #[must_use]
 pub(crate) struct StagedWrite {
-    target: Located<Judged<Writing>>,
+    target: Located<Writing>,
     file: File,
     name: EntryName,
     settled: bool,

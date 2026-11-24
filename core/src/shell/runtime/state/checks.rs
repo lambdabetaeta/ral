@@ -8,7 +8,7 @@ use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
 use crate::fact::{IoOperation, IoSubject, Reason};
 use crate::path::is_loop;
-use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
+use crate::path::{Dir, LeafMode, LexicalPath, Located, Op, Trace, walk};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
@@ -51,16 +51,12 @@ impl Shell {
     ///
     /// # Errors
     /// The grant's refusal.
-    pub fn judge<O: Op>(&mut self, located: Located) -> Settled<Located<Judged<O>>> {
+    pub fn judge<O: Op>(&mut self, located: Located) -> Settled<Located<O>> {
         let path = self.anchor(located.real().as_path());
         self.judge_named::<O>(located, &path)
     }
 
-    fn judge_named<O: Op>(
-        &mut self,
-        located: Located,
-        path: &LexicalPath,
-    ) -> Settled<Located<Judged<O>>> {
+    fn judge_named<O: Op>(&mut self, located: Located, path: &LexicalPath) -> Settled<Located<O>> {
         let verdict = (self.context.grants)
             .judge::<O, _>(self.baseline(), located)
             .map_err(|refused| fs_denial(&self.context.grants, refused, O::FS, path));
@@ -104,7 +100,7 @@ impl Shell {
     /// The grant's refusal, of the name where the walk fails; else the walk's
     /// I/O error, phrased with the name as written; or the refusal of a
     /// reserved device name.
-    pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
+    pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<O>> {
         check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
@@ -114,7 +110,7 @@ impl Shell {
     ///
     /// # Errors
     /// As [`locate`](Self::locate).
-    pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
+    pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<O>> {
         check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
@@ -137,7 +133,7 @@ impl Shell {
         &mut self,
         path: &LexicalPath,
         leaf: LeafMode,
-    ) -> Settled<Option<Located<Judged<O>>>> {
+    ) -> Settled<Option<Located<O>>> {
         check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let located = match walk(path, leaf) {
             Ok(located) => located,
@@ -158,7 +154,7 @@ impl Shell {
     /// [`locate`](Self::locate) as a predicate: `None` where the walk fails
     /// or the grant refuses, so a scan skips what it may not read instead of
     /// aborting.  One off-limits entry must not blank a whole listing.
-    pub fn locate_if_admitted<O: Op>(&mut self, path: &LexicalPath) -> Option<Located<Judged<O>>> {
+    pub fn locate_if_admitted<O: Op>(&mut self, path: &LexicalPath) -> Option<Located<O>> {
         let located = walk(path, LeafMode::Follow).ok()?;
         (self.context.grants)
             .judge::<O, _>(self.baseline(), located)

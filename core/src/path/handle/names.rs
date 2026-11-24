@@ -68,7 +68,7 @@ impl From<NotAnEntryName> for io::Error {
 /// listing shows one and ral has no way to name one).  [`parse`](Self::parse) is
 /// the one constructor and checks that; the walk's parse of a spelling, a
 /// listing, [`fresh`](Self::fresh) and `Deserialize` all go through it, so
-/// [`Dir::open_dir`](super::held::Dir::open_dir) cannot be handed `../x` or
+/// [`Dir::open_dir`](super::object::Dir::open_dir) cannot be handed `../x` or
 /// `a/b`.  Crosses the wire as serde's lossless `OsString` form, never through
 /// `Path`'s UTF-8-only one.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize)]

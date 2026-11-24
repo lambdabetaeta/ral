@@ -8,6 +8,6 @@ error[E0624]: method `open_nofollow` is private
   |
   | /     pub(crate) fn open_nofollow(
   | |         &self,
-  | |         _: &InstallToken,
+  | |         token: &InstallToken,
   | |     ) -> io::Result<Option<Located<Installing>>> {
   | |________________________________________________- private method defined here

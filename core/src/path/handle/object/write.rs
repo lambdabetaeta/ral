@@ -2,13 +2,12 @@
 
 use std::fs::File;
 use std::io;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::super::error::directory_error;
 use super::{
-    Authority, Data, Dir, EntryName, Judged, Kind, Leaf, LeafMode, Located, Node, Sharing,
-    StagedWrite, Streamed, Trace, Writing, host, step_into,
+    Authority, Data, Dir, EntryName, Kind, Leaf, LeafMode, Located, Node, Sharing, StagedWrite,
+    Stamp, Streamed, Trace, Writing, host, step_into,
 };
 
 /// What a data open is for: [`Located::open_data`]'s argument, and what each
@@ -62,7 +61,7 @@ impl ScopedDir {
             node: Arc::clone(&self.directory.node),
             trace: self.directory.trace.clone(),
             stat: self.directory.stat.clone(),
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         }
     }
 
@@ -75,7 +74,7 @@ impl ScopedDir {
 }
 
 /// Owns only the empty-directory rollback, never a tree traversal.
-struct DirectoryRollback(Located<Judged<Writing>>);
+struct DirectoryRollback(Located<Writing>);
 
 impl Drop for DirectoryRollback {
     fn drop(&mut self) {
@@ -101,7 +100,7 @@ impl<A: Authority> Dir<A> {
                 dir: Arc::clone(&self.node),
             },
             linked: None,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         }
     }
 }
@@ -137,7 +136,7 @@ impl Streamed {
     }
 }
 
-impl Located<Judged<Writing>> {
+impl Located<Writing> {
     /// A streaming write — `>>`, or a `>` that cannot stage — opened through
     /// the held leaf and consumed.  `Truncate` does not truncate:
     /// [`Streamed::truncate`] does, after the caller has read its
@@ -289,11 +288,14 @@ impl Located<Judged<Writing>> {
     /// # Errors
     /// `Err(io)` for `NotFound` at the target, `InvalidInput` for a root, or
     /// any listing, locate, or removal I/O error; `Ok(Err(e))` when `judge`
-    /// refuses a descendant, leaving it and its ancestors intact.
+    /// refuses a descendant, leaving it and its ancestors intact (siblings
+    /// visited before the refusal may already have been removed).
     pub fn remove_all<E>(
         self,
         mut judge: impl FnMut(Located) -> Result<Self, E>,
     ) -> io::Result<Result<(), E>> {
+        // Check once before descending so a root is refused rather than emptied.
+        self.present()?;
         self.remove_all_with(&mut judge)
     }
 
@@ -301,14 +303,10 @@ impl Located<Judged<Writing>> {
         self,
         judge: &mut impl FnMut(Located) -> Result<Self, E>,
     ) -> io::Result<Result<(), E>> {
-        // Check before descending so a root is refused rather than emptied.
-        self.present()?;
         match self.into_dir() {
             Ok(dir) => {
-                let names: Vec<EntryName> =
-                    dir.read_dir()?.map(|entry| entry.name().clone()).collect();
-                for name in names {
-                    let child = match dir.locate(&name, LeafMode::NoFollow) {
+                for entry in dir.read_dir()? {
+                    let child = match dir.locate(entry.name(), LeafMode::NoFollow) {
                         Ok(child) => child,
                         Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                         Err(e) => return Err(e),
@@ -324,8 +322,7 @@ impl Located<Judged<Writing>> {
                         Err(e) => return Err(e),
                     }
                 }
-                dir.into_located().remove()?;
-                Ok(Ok(()))
+                dir.into_located().remove().map(Ok)
             }
             Err(leaf) => leaf.remove().map(Ok),
         }
@@ -386,7 +383,7 @@ impl Located<Judged<Writing>> {
             }),
             trace: target.trace.extended([step], Vec::new()),
             stat,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         };
         Ok(ScopedDir {
             directory,
@@ -416,7 +413,7 @@ impl Located<Judged<Writing>> {
             }),
             trace: self.trace.extended([step], Vec::new()),
             stat,
-            _a: PhantomData,
+            stamp: Stamp::unjudged(),
         })
     }
 }
@@ -427,7 +424,7 @@ impl StagedWrite {
         &mut self.file
     }
 
-    pub(crate) fn target(&self) -> &Located<Judged<Writing>> {
+    pub(crate) fn target(&self) -> &Located<Writing> {
         &self.target
     }
 

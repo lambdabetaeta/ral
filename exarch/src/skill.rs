@@ -21,9 +21,7 @@ use ral_core::fact::{
     InvalidFailure, PodKind, Reason, SkillFailure, SkillFailureFrontmatter, SkillFailureRead,
     SkillFailureYaml, SkillField, SkillPlace, Utf8Failure, Utf8Subject,
 };
-use ral_core::path::{
-    CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
-};
+use ral_core::path::{CwdPath, Dir, Kind, LeafMode, LexicalPath, Located, Reading, Resolver};
 use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -62,13 +60,13 @@ pub(crate) trait Judge {
     fn anchor(&self, path: &Path) -> LexicalPath;
     /// The regular file `rp` names, held for reading; `None` where it is
     /// absent, not a file, or refused.
-    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Judged<Reading>>>;
+    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Reading>>;
     /// The directory `rp` names, held for reading; `None` where it is absent
     /// or refused.
-    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>>;
+    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Reading>>;
 }
 
-fn is_file(held: &Located<Judged<Reading>>) -> bool {
+fn is_file(held: &Located<Reading>) -> bool {
     held.stat().is_some_and(|stat| stat.kind == Kind::File)
 }
 
@@ -77,13 +75,13 @@ impl Judge for Shell {
         Self::anchor(self, path)
     }
 
-    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Judged<Reading>>> {
+    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Reading>> {
         // A refusal is on the trail already; an absent file is no skill.
         let held = self.locate_existing::<Reading>(rp, LeafMode::Follow);
         held.ok().flatten().filter(is_file)
     }
 
-    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>> {
+    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Reading>> {
         self.locate_dir::<Reading>(rp).ok()
     }
 }
@@ -134,12 +132,12 @@ impl Judge for Boot<'_> {
         self.resolver.anchor(path)
     }
 
-    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Judged<Reading>>> {
+    fn file(&mut self, rp: &LexicalPath) -> Option<Located<Reading>> {
         let held = self.grants.locate::<Reading, Located>(self.baseline, rp);
         held.ok().filter(is_file)
     }
 
-    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>> {
+    fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Reading>> {
         self.grants.locate::<Reading, Dir>(self.baseline, rp).ok()
     }
 }
@@ -161,7 +159,7 @@ pub(crate) enum Source {
     /// A directory under a root, with its `SKILL.md` held for reading.
     Disk {
         dir: PathBuf,
-        file: Box<Located<Judged<Reading>>>,
+        file: Box<Located<Reading>>,
     },
     /// A `SKILL.md` compiled into exarch.
     Builtin(&'static str),

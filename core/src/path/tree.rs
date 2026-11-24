@@ -26,8 +26,8 @@ use crate::authority::policy::{ReadRegion, Ungoverned};
 use crate::path::sigil::literal_relative;
 use crate::path::site::Silent;
 use crate::path::{
-    CwdPath, Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Listing, Located, ObjectId,
-    Reading, Stat, Unjudged, git, shown, walk, walk_dir,
+    CwdPath, Dir, EntryName, Kind, LeafMode, LexicalPath, Listing, Located, ObjectId, Reading,
+    Stat, Unjudged, git, shown, walk, walk_dir,
 };
 use crate::process::{Cancellation, DurableRoot, Scope};
 use crate::site::site;
@@ -215,7 +215,7 @@ impl WalkEntry {
 
 /// A directory entered, and what is left of it to yield.
 struct Frame {
-    dir: Dir<Judged<Reading>>,
+    dir: Dir<Reading>,
     id: ObjectId,
     shown: LexicalPath,
     depth: usize,
@@ -448,7 +448,7 @@ impl Entries {
     /// The scope's stop; the listing's own failure, inside.
     fn enter(
         &mut self,
-        dir: Dir<Judged<Reading>>,
+        dir: Dir<Reading>,
         shown: LexicalPath,
         depth: usize,
         name: Option<&OsStr>,
@@ -475,10 +475,7 @@ impl Entries {
         Ok(Ok(()))
     }
 
-    fn list(
-        &self,
-        dir: &Dir<Judged<Reading>>,
-    ) -> Result<io::Result<(Vec<Item>, Marks)>, Cancellation> {
+    fn list(&self, dir: &Dir<Reading>) -> Result<io::Result<(Vec<Item>, Marks)>, Cancellation> {
         match dir.read_dir() {
             Ok(listing) => self.admit(listing).map(Ok),
             Err(e) => Ok(Err(e)),
@@ -510,13 +507,7 @@ impl Entries {
     }
 
     /// The rules the entered directory `dir` adds to those above it.
-    fn layer(
-        &self,
-        rules: &Rules,
-        dir: &Dir<Judged<Reading>>,
-        marks: &Marks,
-        named: bool,
-    ) -> Layer {
+    fn layer(&self, rules: &Rules, dir: &Dir<Reading>, marks: &Marks, named: bool) -> Layer {
         let dot_git = marks.git.then(|| self.dot_git_in(dir)).flatten();
         let within = dot_git.is_some() || rules.in_repository();
         let depth = rules.depth() + usize::from(named);
@@ -570,7 +561,7 @@ impl Entries {
     /// The rules of every directory above the root, and the names that lead
     /// to it: `.ignore` of each up to the filesystem root, and `.gitignore`
     /// of those within the nearest repository.
-    fn ancestry(&self, root: &Dir<Judged<Reading>>) -> Rules {
+    fn ancestry(&self, root: &Dir<Reading>) -> Rules {
         let real = root.real();
         let mut rules = Rules::new(normals(real.as_path()));
         let above: Vec<(&Path, Option<(LexicalPath, bool)>)> =
@@ -587,7 +578,7 @@ impl Entries {
 
     /// The `.git` of the entered directory `dir`, where one is there and the
     /// region reads it: its spelling, and whether it is a directory.
-    fn dot_git_in(&self, dir: &Dir<Judged<Reading>>) -> Option<(LexicalPath, bool)> {
+    fn dot_git_in(&self, dir: &Dir<Reading>) -> Option<(LexicalPath, bool)> {
         let name = EntryName::parse(OsStr::new(".git")).ok()?;
         let found = dir.locate(&name, LeafMode::Follow).ok()?;
         self.dot_git(
@@ -622,7 +613,7 @@ impl Entries {
     }
 }
 
-fn slurp(file: &Located<Judged<Reading>>) -> io::Result<Vec<u8>> {
+fn slurp(file: &Located<Reading>) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.read()?.read_to_end(&mut bytes)?;
     Ok(bytes)

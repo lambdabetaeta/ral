@@ -27,8 +27,8 @@ use super::{GrantLayer, GrantStack, Join, Meet};
 use crate::authority::grant::freeze::Place;
 use crate::authority::grant::value::FsTable;
 use crate::path::{
-    Depth, DirEntry, Excluded, FrozenPath, Handle, Judged, LexicalPath, MatchedBy, ObjectId, Op,
-    Reading, RealPath, Subject, Trace, Writing, failure_trace,
+    Depth, DirEntry, Excluded, FrozenPath, Handle, LexicalPath, MatchedBy, ObjectId, Op, Reading,
+    RealPath, Subject, Trace, Writing, failure_trace,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -320,7 +320,7 @@ pub struct ReadRegion(Option<FsRules>);
 pub struct Ungoverned;
 
 impl Ungoverned {
-    pub fn read<H: Handle>(h: H) -> H::As<Judged<Reading>> {
+    pub fn read<H: Handle>(h: H) -> H::As<Reading> {
         h.judged(Verdict(PhantomData))
     }
 
@@ -332,7 +332,7 @@ impl Ungoverned {
     /// directories, the files the user writes at its places, and the one new
     /// file a user names. [`crate::own`] is the one caller, with a typed site
     /// documenting why no grant governs it.
-    pub(crate) fn write<H: Handle>(h: H) -> H::As<Judged<Writing>> {
+    pub(crate) fn write<H: Handle>(h: H) -> H::As<Writing> {
         h.judged(Verdict(PhantomData))
     }
 }
@@ -346,10 +346,7 @@ impl ReadRegion {
     ///
     /// # Errors
     /// What withholds it.
-    pub(crate) fn judge<H: Handle>(
-        &self,
-        h: H,
-    ) -> Result<H::As<Judged<Reading>>, Withheld<FsDeny>> {
+    pub(crate) fn judge<H: Handle>(&self, h: H) -> Result<H::As<Reading>, Withheld<FsDeny>> {
         self.withheld(Subject::Access(h.trace()))?;
         Ok(h.judged(Verdict(PhantomData)))
     }
@@ -432,11 +429,7 @@ impl GrantStack {
     ///
     /// # Errors
     /// [`Refused`], the veto's or the stack's.
-    pub fn judge<O: Op, H: Handle>(
-        &self,
-        baseline: &Baseline,
-        h: H,
-    ) -> Result<H::As<Judged<O>>, Refused> {
+    pub fn judge<O: Op, H: Handle>(&self, baseline: &Baseline, h: H) -> Result<H::As<O>, Refused> {
         self.refusal_fs(baseline, O::FS, h.trace())?;
         Ok(h.judged(Verdict(PhantomData)))
     }
@@ -451,7 +444,7 @@ impl GrantStack {
         &self,
         baseline: &Baseline,
         rp: &LexicalPath,
-    ) -> Result<H::As<Judged<O>>, LocateError> {
+    ) -> Result<H::As<O>, LocateError> {
         let held = H::walk(rp).or_else(|e| {
             self.judge_failure(baseline, O::FS, rp, &e)?;
             Err(LocateError::Io(e))

@@ -9,7 +9,7 @@ use super::super::resolve::{
     LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, finish, walk, walk_dir, walk_dir_made,
     walk_lenient, walk_with,
 };
-use super::super::{Access, Dir, Judged, Leaf, Located, Streaming, Visibility, Writing, host};
+use super::super::{Access, Dir, Leaf, Located, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
 use crate::environ::EnvVars;
 use crate::path::{CwdPath, LexicalPath, Resolver};
@@ -29,15 +29,15 @@ pub(super) fn spelled(path: &Path) -> LexicalPath {
 
 /// `path` walked, and the directory `path` entered, as these tests hold
 /// them: retagged as judged for writing, since the tests judge nothing.
-pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
+pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located<Writing>> {
     walk(&spelled(path), mode).map(writing)
 }
 
-fn located(path: &Path) -> io::Result<Located<Judged<Writing>>> {
+fn located(path: &Path) -> io::Result<Located<Writing>> {
     located_with(path, LeafMode::Follow)
 }
 
-pub(super) fn entered(path: &Path) -> io::Result<Dir<Judged<Writing>>> {
+pub(super) fn entered(path: &Path) -> io::Result<Dir<Writing>> {
     walk_dir(&spelled(path)).map(writable)
 }
 
@@ -2144,6 +2144,15 @@ fn remove_takes_the_entry_and_refuses_what_is_not_one() {
         root.present().map(|_| ()).unwrap_err().kind(),
         io::ErrorKind::InvalidInput
     );
+    let mut called = false;
+    let err = root
+        .remove_all(|_| {
+            called = true;
+            Err(())
+        })
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert!(!called);
 }
 
 /// `remove_all` judges every descendant: a denied subtree or a baseline-pinned

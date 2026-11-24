@@ -12,7 +12,7 @@ use super::super::super::trace::{RealPath, Stat, Trace};
 #[cfg(target_os = "linux")]
 use super::super::Writing;
 use super::super::resolve::{LeafMode, walk, walk_dir};
-use super::super::{Dir, Installing, Judged, Listing, Located, Reading, Unjudged};
+use super::super::{Dir, Installing, Listing, Located, Reading, Unjudged};
 use crate::path::LexicalPath;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -142,7 +142,7 @@ fn an_unjudged_directory_lists_nothing_and_states_nothing() {
 #[test]
 fn a_read_judged_object_reads_and_states_and_has_no_write_operation() {
     let (_tmp, located, _) = walked();
-    let located: Located<Judged<Reading>> = located.marked();
+    let located: Located<Reading> = located.marked();
     let _: io::Result<File> = located.read();
     let _: Option<&Stat> = located.stat();
     let _: io::Result<PathBuf> = located.read_link();
@@ -164,7 +164,7 @@ fn a_read_judged_object_reads_and_states_and_has_no_write_operation() {
 #[test]
 fn a_read_judged_directory_descends_to_an_unjudged_one() {
     let (_tmp, _, dir) = walked();
-    let dir: Dir<Judged<Reading>> = dir.marked();
+    let dir: Dir<Reading> = dir.marked();
     let _: io::Result<Listing<'_>> = dir.read_dir();
     let child: io::Result<Dir<Unjudged>> = dir.open_dir(&sub());
     assert!(child.is_ok());
@@ -231,8 +231,8 @@ fn only_an_installing_handle_lends_its_descriptor() {
     }
     assert!(lends!(Dir<Installing>));
     assert!(!lends!(Dir<Unjudged>));
-    assert!(!lends!(Dir<Judged<Reading>>));
-    assert!(!lends!(Dir<Judged<Writing>>));
+    assert!(!lends!(Dir<Reading>));
+    assert!(!lends!(Dir<Writing>));
 
     let (_tmp, located, _) = walked();
     let located: Located<Installing> = located.marked();

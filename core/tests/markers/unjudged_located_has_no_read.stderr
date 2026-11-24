@@ -4,10 +4,10 @@ error[E0599]: the method `read` exists for struct `Located`, but its trait bound
 6 |     let _ = walk(spelling, LeafMode::Follow).unwrap().read();
   |                                                       ^^^^
   |
- ::: src/path/handle/held.rs
+ ::: src/path/handle/object.rs
   |
   | pub enum Unjudged {}
-  | ----------------- doesn't satisfy `Unjudged: Reads`
+  | ----------------- doesn't satisfy `Unjudged: ral_core::path::Op`
   |
   = note: the following trait bounds were not satisfied:
-          `Unjudged: Reads`
+          `Unjudged: ral_core::path::Op`
