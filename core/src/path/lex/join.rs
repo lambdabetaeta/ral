@@ -1,8 +1,10 @@
 //! A subpath joined onto a base name by name, and a suffix appended to a
 //! name.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use super::fold::verbatim_joined;
 use super::head::{absolute_under, has_drive, is_sep_byte};
 use crate::path::PathRules;
 
@@ -40,15 +42,27 @@ pub(crate) fn join_under(base: &str, sub: &str, rules: PathRules) -> Result<Stri
 }
 
 /// [`join_under`] under the host's rules, onto a path the host holds, whose
-/// name need not be UTF-8.
+/// name need not be UTF-8.  Onto an exact verbatim base, `.` and `..` fold
+/// as Win32 would read them ([`verbatim_joined`]).
 ///
 /// # Errors
 /// [`join_under`]'s.
 pub(crate) fn join_relative(base: impl AsRef<Path>, sub: &str) -> Result<PathBuf, Rerooting> {
     let base = base.as_ref().as_os_str();
-    let mut joined = base.to_os_string();
-    joined.push(appended(base.as_encoded_bytes(), sub, PathRules::HOST)?);
-    Ok(PathBuf::from(joined))
+    let tail = appended(base.as_encoded_bytes(), sub, PathRules::HOST)?;
+    let Some(joined) = verbatim_joined(base.as_encoded_bytes(), tail.as_bytes(), PathRules::HOST)
+    else {
+        let mut joined = base.to_os_string();
+        joined.push(tail);
+        return Ok(PathBuf::from(joined));
+    };
+    // SAFETY: `verbatim_joined` keeps runs of the encoded `base` and of the
+    // UTF-8 `tail` cut at ASCII separators, joined by ASCII separators, so no
+    // cut lands inside a multi-byte sequence and no surrogate half meets
+    // another.
+    Ok(PathBuf::from(unsafe {
+        OsStr::from_encoded_bytes_unchecked(&joined)
+    }))
 }
 
 /// What [`join_under`] appends to `base`: each name of `sub`, a separator

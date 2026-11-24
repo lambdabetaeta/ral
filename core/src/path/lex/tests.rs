@@ -1401,6 +1401,66 @@ fn a_windows_fold_respells_a_head_only_where_that_keeps_it() {
     }
 }
 
+/// [`verbatim_joined`] on strings, for the rows below.
+fn verbatim_joined_str(base: &str, suffix: &str, rules: PathRules) -> Option<String> {
+    verbatim_joined(base.as_bytes(), suffix.as_bytes(), rules)
+        .map(|joined| String::from_utf8(joined).expect("a fixture is UTF-8"))
+}
+
+/// Onto an exact verbatim drive or share a suffix is read as Win32 reads
+/// it: either separator splits, `.` and empty names drop, and `..` takes a
+/// name, the base's own included, but never the volume.  The base's names
+/// are its kernel's, `/` a byte of one.
+#[test]
+fn a_suffix_folds_onto_an_exact_verbatim_base() {
+    for (base, suffix, want) in [
+        (r"\\?\C:\d", r".\x", r"\\?\C:\d\x"),
+        (r"\\?\C:\d", "a/b", r"\\?\C:\d\a\b"),
+        (r"\\?\C:\d", r"..\x", r"\\?\C:\x"),
+        (r"\\?\C:\d", "..", r"\\?\C:\"),
+        (r"\\?\C:\", r"..\..\x", r"\\?\C:\x"),
+        (r"\\?\C:\d\e", r"a\..\..\x", r"\\?\C:\d\x"),
+        (r"\\?\C:\a/b", r"..\x", r"\\?\C:\x"),
+        (r"\\?\C:\d\", "/x", r"\\?\C:\d\x"),
+        (r"\\?\C:\d", r"x\", r"\\?\C:\d\x\"),
+        (r"\\?\C:\d", r"x\.", r"\\?\C:\d\x"),
+        (r"\\?\C:\d", "", r"\\?\C:\d"),
+        (r"\\?\UNC\srv\sh\d", r"..\..\x", r"\\?\UNC\srv\sh\x"),
+        (r"\\?\UNC\srv\sh", "..", r"\\?\UNC\srv\sh\"),
+    ] {
+        assert_eq!(
+            verbatim_joined_str(base, suffix, PathRules::Windows).as_deref(),
+            Some(want),
+            "{base} + {suffix}"
+        );
+    }
+}
+
+/// Every other base is read as written by its kernel, so the caller's own
+/// concatenation stands: a Windows path Win32 normalises itself, a
+/// slash-spelled verbatim head among them; a device or malformed head,
+/// whose extent ral cannot cut; and any Posix path, whose `..` the kernel
+/// reads after the links before it.
+#[test]
+fn no_other_base_takes_a_verbatim_fold() {
+    for (base, rules) in [
+        (r"C:\d", PathRules::Windows),
+        (r"\\srv\sh\d", PathRules::Windows),
+        ("//?/C:/d", PathRules::Windows),
+        (r"\\.\pipe\d", PathRules::Windows),
+        (r"\\?\C:", PathRules::Windows),
+        (r"\\?\Volume{0}\d", PathRules::Windows),
+        ("/d", PathRules::Posix),
+        (r"\\?\C:\d", PathRules::Posix),
+    ] {
+        assert_eq!(
+            verbatim_joined_str(base, r"..\x", rules),
+            None,
+            "{base} under {rules:?}"
+        );
+    }
+}
+
 /// Compare `before` and `after` parsed heads after folding under `rules`:
 /// `kind`, `volume` (with `/` respelled to `\` when `before.respell_head()`
 /// under Windows rules), and `spelling.namespace` are preserved — save for

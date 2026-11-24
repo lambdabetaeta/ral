@@ -1,9 +1,10 @@
-//! The `.`/`..` fold: a path's logical reading, its head meaning what it did.
+//! The `.`/`..` fold: a path's logical reading, its head meaning what it did,
+//! and a suffix's reading onto a verbatim base, where Win32 does not fold.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::head::{is_sep_byte, parse_bytes};
+use super::head::{Namespace, is_sep_byte, parse_bytes};
 use crate::path::PathRules;
 
 /// Fold `.`/`..` lexically under the host's rules, touching neither
@@ -83,17 +84,7 @@ pub(super) fn fold_bytes(path: &[u8], rules: PathRules) -> Vec<u8> {
     let parsed = parse_bytes(path, rules);
     let rooted = parsed.is_rooted();
     let (head, tail) = path.split_at(parsed.head_len);
-    let mut names: Vec<&[u8]> = Vec::new();
-    for name in tail.split(|&b| is_sep_byte(rules, b)) {
-        match name {
-            b"" | b"." => {}
-            b".." if names.last().is_some_and(|last| *last != b"..") => {
-                names.pop();
-            }
-            b".." if rooted => {}
-            _ => names.push(name),
-        }
-    }
+    let names = folded_names(tail.split(|&b| is_sep_byte(rules, b)), rooted);
     let mut folded: Vec<u8> = if parsed.respell_head() {
         head.iter()
             .map(|&b| {
@@ -124,4 +115,66 @@ pub(super) fn fold_bytes(path: &[u8], rules: PathRules) -> Vec<u8> {
         folded.extend_from_slice(name);
     }
     folded
+}
+
+/// `names` with `.` and empty names dropped and each `..` taking the name
+/// before it.  A `..` with no name to take drops under a root, `rooted`, and
+/// otherwise stays, for a join to climb by.
+fn folded_names<'a>(names: impl Iterator<Item = &'a [u8]>, rooted: bool) -> Vec<&'a [u8]> {
+    names.fold(Vec::new(), |mut kept, name| {
+        match name {
+            b"" | b"." => {}
+            b".." if kept.last().is_some_and(|last| *last != b"..") => {
+                kept.pop();
+            }
+            b".." if rooted => {}
+            _ => kept.push(name),
+        }
+        kept
+    })
+}
+
+/// `suffix`, a relative spelling under `rules`, appended to `base` as Win32
+/// reads it, where Win32 itself will not: onto an exact verbatim drive or
+/// share (`\\?\C:\d`, `\\?\UNC\srv\sh\d`), past whose head Win32 hands a
+/// path to the kernel uninterpreted, `/` a byte of a name and `.` and `..`
+/// names.  There `suffix` splits on either separator and folds as a relative
+/// path does ([`fold_dots_under`]), its leading `..`s then taking `base`'s
+/// own names, never its volume: `\\?\C:\d` and `..\x` are `\\?\C:\x`.  The
+/// names join with `\`, and end with one where `suffix` does, as Win32 keeps
+/// a trailing separator, or where none is left past the volume, whose root
+/// is `\\?\C:\`.  The result is `base`'s volume and runs of `base` and
+/// `suffix` cut at ASCII separators, joined by `\`: encoded as validly as
+/// they are.
+///
+/// `None` for any other base, onto which a plain concatenation is read as
+/// written: Win32 normalises every other spelling itself, and a Posix
+/// kernel must read a `..` after the links before it ([`anchor`]).
+///
+/// [`anchor`]: super::anchor()
+pub(in crate::path) fn verbatim_joined(
+    base: &[u8],
+    suffix: &[u8],
+    rules: PathRules,
+) -> Option<Vec<u8>> {
+    let parsed = parse_bytes(base, rules);
+    let volume = parsed
+        .volume()
+        .filter(|_| parsed.spelling.namespace == Some(Namespace::Verbatim { exact: true }))?;
+    let separator = PathRules::Windows.separator();
+    let own: Vec<&[u8]> = base[volume.len()..]
+        .split(|&b| b == separator)
+        .filter(|name| !name.is_empty())
+        .collect();
+    let appended = folded_names(suffix.split(|&b| is_sep_byte(rules, b)), false);
+    let climbs = appended.iter().take_while(|name| **name == b"..").count();
+    let parts: Vec<&[u8]> = std::iter::once(volume)
+        .chain(own[..own.len().saturating_sub(climbs)].iter().copied())
+        .chain(appended[climbs..].iter().copied())
+        .collect();
+    let mut joined = parts.join(&separator);
+    if parts.len() == 1 || suffix.last().is_some_and(|&b| is_sep_byte(rules, b)) {
+        joined.push(separator);
+    }
+    Some(joined)
 }

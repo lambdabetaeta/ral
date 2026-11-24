@@ -293,7 +293,8 @@ are named through them and re-exported nowhere.
   tree back, judged by the positions the two walks reach, never by identity; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
   and each caller picks its own honest answer; `TildePath::shown` is the one
   spelling `~`, `home` and a `~/…` command head share, and `TildePath::expand`
-  the path such a head runs). The expansion `expand_path_prefix` answers is
+  the path such a head runs, the suffix read onto an exact verbatim home by
+  `verbatim_joined`). The expansion `expand_path_prefix` answers is
   native, in the host's own spelling, for the resolver to hand on to the OS.
   `sigil::SigilHead` is the one reading of a path's head — `Tilde`, `Xdg`, or
   `UnknownXdg` (an `xdg:` no kind answers to, passed through literally) — that
@@ -307,9 +308,15 @@ are named through them and re-exported nowhere.
   names past `windows_head`, the one split every Windows identity takes),
   `eligibility.rs` (`grant_eligibility`, `classify_subpath`), `anchoring.rs`
   (`anchor`, and `anchor_on` for a caller that may have no cwd: `PATH` entries,
-  git pointers). Anchoring uses native separators in a relative suffix, so a
-  verbatim Windows cwd cannot turn its `/` separators into filename bytes;
-  absolute inputs and the suffix's dot components remain as written.
+  git pointers). Anchoring uses native separators in a relative suffix and
+  leaves its dot components and absolute inputs as written, except onto an
+  exact `\\?\` verbatim drive or share, past whose head Win32 hands the kernel
+  `/` as a name byte and `.`/`..` as names: there `fold::verbatim_joined`
+  reads the suffix as Win32 would — either separator splits, `.` and empty
+  names drop, `..` takes a name of the base but never its volume, a trailing
+  separator stays — and a root-relative `\x` joins the volume's root. Every
+  composer that appends a Win32 suffix to a possibly-verbatim base goes
+  through it: `anchor`, `TildePath::expand` and `join_relative` (so `xdg:`).
   `fold.rs`, `join.rs`, `name.rs` (a path's names by spelling:
   `file_name`, `spelled_parent`, `extension`, `utf8`, `relative_key` and its
   inverse `key_within`) and `command.rs` (`names_a_path`, the Windows exec

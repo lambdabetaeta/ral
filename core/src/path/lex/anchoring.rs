@@ -4,12 +4,16 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use super::fold::verbatim_joined;
 use super::head::{HeadKind, is_absolute, is_sep_byte, parse_bytes};
 use crate::path::{CwdPath, PathRules};
 
 /// `input` made absolute against `cwd` as the host reads it.  Unfolded: a
 /// `..` or a trailing separator is the kernel's to read, after the links
-/// before it ([`fold_dots`] is the logical reading).
+/// before it ([`fold_dots`] is the logical reading).  The exception is a
+/// cwd with an exact verbatim head (`\\?\C:\d`), past which the kernel reads
+/// `.` and `..` as names: a relative `input` folds onto it as Win32 would
+/// read it ([`verbatim_joined`]).
 ///
 /// An absolute `input` is kept, and a relative one joins `cwd`.  Under
 /// Windows rules two more spellings are relative to less than a whole path,
@@ -29,6 +33,7 @@ use crate::path::{CwdPath, PathRules};
 /// asserts.
 ///
 /// [`fold_dots`]: super::fold_dots
+/// [`verbatim_joined`]: super::verbatim_joined
 /// [`LexicalPath`]: crate::path::LexicalPath
 pub(crate) fn anchor(cwd: &CwdPath, input: &Path) -> PathBuf {
     if is_absolute(input) {
@@ -53,7 +58,8 @@ fn against(cwd: &CwdPath, input: &Path) -> PathBuf {
     let bytes = input.as_os_str().as_encoded_bytes();
     if PathRules::HOST == PathRules::Windows {
         match parse_bytes(bytes, PathRules::Windows).kind {
-            HeadKind::Driveless | HeadKind::Posix => return joined(volume(cwd), bytes),
+            // One separator opens a root-relative spelling.
+            HeadKind::Driveless | HeadKind::Posix => return joined(&root(cwd), &bytes[1..]),
             HeadKind::DriveRelative { .. } => return drive_relative(cwd, input),
             _ => {}
         }
@@ -81,38 +87,43 @@ fn drive_letter(cwd: &[u8]) -> Option<u8> {
     parse_bytes(cwd, PathRules::Windows).drive_letter()
 }
 
-/// The drive or share a [`CwdPath`] under Windows rules is on, as spelled
-/// and with no separator after it: `C:`, `\\srv\sh`, `\\?\C:`,
-/// `\\?\UNC\srv\sh`.
-fn volume(cwd: &CwdPath) -> &[u8] {
-    parse_bytes(
+/// The root of the drive or share a [`CwdPath`] under Windows rules is on,
+/// as spelled: `C:\`, `\\srv\sh\`, `\\?\C:\`, `\\?\UNC\srv\sh\`.
+fn root(cwd: &CwdPath) -> Vec<u8> {
+    let volume = parse_bytes(
         cwd.as_path().as_os_str().as_encoded_bytes(),
         PathRules::Windows,
     )
     .volume()
-    .expect("CwdPath is on a drive or a share under Windows rules")
+    .expect("CwdPath is on a drive or a share under Windows rules");
+    [volume, br"\".as_slice()].concat()
 }
 
-/// `base`, then `rest`, with native separators in the relative suffix.
-/// A verbatim base must not turn the suffix's `/` separators into name bytes.
+/// `base`, then `rest`, with native separators in the relative suffix,
+/// folded on as Win32 reads it where `base` is exact verbatim
+/// ([`verbatim_joined`]).
 fn joined(base: &[u8], rest: &[u8]) -> PathBuf {
-    let is_separator = |b: Option<&u8>| b.is_some_and(|&b| is_sep_byte(PathRules::HOST, b));
-    let mut out = base.to_vec();
-    if !rest.is_empty() && !is_separator(base.last()) && !is_separator(rest.first()) {
-        out.push(PathRules::HOST.separator());
-    }
-    out.extend(rest.iter().map(|&b| {
-        if is_sep_byte(PathRules::HOST, b) {
-            PathRules::HOST.separator()
-        } else {
-            b
+    let out = verbatim_joined(base, rest, PathRules::HOST).unwrap_or_else(|| {
+        let is_separator = |b: Option<&u8>| b.is_some_and(|&b| is_sep_byte(PathRules::HOST, b));
+        let mut out = base.to_vec();
+        if !rest.is_empty() && !is_separator(base.last()) && !is_separator(rest.first()) {
+            out.push(PathRules::HOST.separator());
         }
-    }));
+        out.extend(rest.iter().map(|&b| {
+            if is_sep_byte(PathRules::HOST, b) {
+                PathRules::HOST.separator()
+            } else {
+                b
+            }
+        }));
+        out
+    });
     // SAFETY: `base` and `rest` are each a whole encoded path or a run of one
     // cut at an ASCII byte, which cannot land inside a multi-byte
-    // UTF-8/WTF-8 sequence; only ASCII separators are respelled. A separator
-    // ends `base`, opens `rest` or is put between them, unless `rest` is
-    // empty, so no surrogate half meets another, and `out` is encoded as
-    // validly as its parts.
+    // UTF-8/WTF-8 sequence.  `verbatim_joined` keeps runs of them cut at
+    // ASCII separators, joined by ASCII separators; otherwise only ASCII
+    // separators are respelled, and a separator ends `base`, opens `rest` or
+    // is put between them, unless `rest` is empty.  Either way no surrogate
+    // half meets another, and `out` is encoded as validly as its parts.
     PathBuf::from(unsafe { OsStr::from_encoded_bytes_unchecked(&out) })
 }

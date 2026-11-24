@@ -82,7 +82,8 @@ pub(crate) fn literal_relative(name: &str) -> String {
 /// The expansion is native, in the host's own spelling, for the resolver to
 /// hand on to the OS: `~` as [`TildePath::expand`] expands it, and the `xdg:`
 /// sub-path joined as [`join_relative`] joins it, its leading separators
-/// dropped and `..` included, for the resolver to fold.
+/// dropped and `..` included, for the resolver to fold, save onto an exact
+/// verbatim base, where Win32 reads it folded.
 ///
 /// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is:
 /// whatever cannot be answered passes through literally — an unknown `home`

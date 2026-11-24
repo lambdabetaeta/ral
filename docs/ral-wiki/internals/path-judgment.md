@@ -56,7 +56,10 @@ between steps changes which child is obtained and the transcript says which.
 - **Anchoring is not folding.** A logical consumer (`cd`, `within [dir: …]`,
   `absolute-path`, a display base) folds `.` and `..` explicitly
   (`LexicalPath::folded`); what reaches the disk is handed unfolded
-  ([[decisions/261021_access-is-physical|access-is-physical]]).
+  ([[decisions/261021_access-is-physical|access-is-physical]]), save a
+  relative suffix appended onto an exact `\\?\` verbatim base, which ral folds
+  as Win32 would because past that head the kernel reads `.` and `..` as
+  names.
 - **A listing makes a `Listed`, not a `Trace`**: what a listing saw of an
   entry, judged only as a name shown. Names are enumerated first; each entry's
   metadata and identity are read when yielded. On Windows that is an

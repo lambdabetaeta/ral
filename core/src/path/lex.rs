@@ -2,8 +2,9 @@
 //! under either platform's rules from any host.  `head` parses a head once,
 //! and every judgment of it projects from that parse; `eligibility` says
 //! which platforms a grant's raw payload is live on; `anchoring` reads a
-//! relative spelling against a cwd; `fold` folds `.` and `..`; `join` joins a
-//! subpath; `name` reads a path's names; `command` reads a command name.
+//! relative spelling against a cwd; `fold` folds `.` and `..`, and a suffix
+//! onto a verbatim base as Win32 reads it; `join` joins a subpath; `name`
+//! reads a path's names; `command` reads a command name.
 //!
 //! Containment and name identity live in [`super::identity`]; device names in
 //! [`super::device`].
@@ -22,7 +23,7 @@ pub(crate) use command::is_batch_image;
 pub(crate) use command::{WINDOWS_EXEC_EXTENSIONS, names_a_path, names_a_path_for};
 pub(crate) use eligibility::{GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility};
 pub(crate) use fold::fold_dots;
-pub(in crate::path) use fold::fold_dots_under;
+pub(in crate::path) use fold::{fold_dots_under, verbatim_joined};
 pub use head::is_absolute;
 #[cfg(any(windows, test))]
 pub(crate) use head::is_volume_guid;

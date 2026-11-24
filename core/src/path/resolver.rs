@@ -150,16 +150,20 @@ mod tests {
         );
     }
 
+    /// Past an exact verbatim cwd the kernel reads `/` as a byte of a name
+    /// and `.` and `..` as names, so a relative spelling is read onto it as
+    /// Win32 would read it; onto any other cwd it stays unfolded.
     #[cfg(windows)]
     #[test]
-    fn relative_separators_do_not_become_verbatim_name_bytes() {
+    fn a_relative_spelling_is_read_onto_a_verbatim_cwd_as_win32_reads_it() {
         let env = EnvVars::new();
         for (base, relative, expected) in [
             (r"C:\work", "./file", r"C:\work\.\file"),
-            (r"\\?\C:\work", "./file", r"\\?\C:\work\.\file"),
-            (r"\\?\C:\work", "./../file", r"\\?\C:\work\.\..\file"),
+            (r"\\?\C:\work", "./file", r"\\?\C:\work\file"),
+            (r"\\?\C:\work", "./../file", r"\\?\C:\file"),
             (r"\\?\C:\work", "C:dir/file/", r"\\?\C:\work\dir\file\"),
             (r"\\?\C:\work", "/dir/file", r"\\?\C:\dir\file"),
+            (r"\\?\C:\work", r"\..\..\file", r"\\?\C:\file"),
             (
                 r"\\?\UNC\server\share\work",
                 "dir/file",

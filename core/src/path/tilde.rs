@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::PathRules;
+use super::lex::verbatim_joined;
 use super::show::fold_for;
 
 /// `~` or `~/sub`, the suffix stored with the separator it was written with.
@@ -41,14 +42,24 @@ impl TildePath {
 
     /// The native expansion, as the OS takes it, lifted to a path and never
     /// read for a sigil again: exactly one separator stands between `home`
-    /// and the suffix, which keeps its written spelling.
+    /// and the suffix, which keeps its written spelling, unless `home` is
+    /// exact verbatim, onto which the suffix folds as Win32 would read it
+    /// ([`verbatim_joined`]).
     pub(crate) fn expand(&self, home: &str) -> PathBuf {
         match self.suffix.as_deref() {
             None => PathBuf::from(home),
-            Some(suffix) => {
-                let home = home.trim_end_matches(|c| PathRules::HOST.is_separator(c));
-                PathBuf::from(format!("{home}{suffix}"))
-            }
+            Some(suffix) => verbatim_joined(home.as_bytes(), suffix.as_bytes(), PathRules::HOST)
+                .map_or_else(
+                    || {
+                        let home = home.trim_end_matches(|c| PathRules::HOST.is_separator(c));
+                        format!("{home}{suffix}")
+                    },
+                    |joined| {
+                        String::from_utf8(joined)
+                            .expect("a verbatim join cuts UTF-8 only at ASCII separators")
+                    },
+                )
+                .into(),
         }
     }
 
@@ -194,6 +205,25 @@ mod tests {
         let shown = tilde(Some(r"\sub")).shown(home);
         assert_eq!(shown, "C:/Users/u/sub");
         assert_eq!(abbreviate_home(&shown, Some(home)), "~/sub");
+    }
+
+    /// `expand` reads [`PathRules::HOST`], so this is pinned on Windows
+    /// alone: past a verbatim home the kernel reads `/` and `..` as names,
+    /// so the suffix folds onto it as Win32 would read it.
+    #[cfg(windows)]
+    #[test]
+    fn expansion_onto_a_verbatim_home_is_read_as_win32_reads_it() {
+        for (suffix, want) in [
+            ("/ral/plugins/p.ral", r"\\?\C:\h\ral\plugins\p.ral"),
+            (r"\..\p.ral", r"\\?\C:\p.ral"),
+            ("/", r"\\?\C:\h\"),
+        ] {
+            assert_eq!(
+                tilde(Some(suffix)).expand(r"\\?\C:\h"),
+                PathBuf::from(want),
+                "{suffix}"
+            );
+        }
     }
 
     #[test]
