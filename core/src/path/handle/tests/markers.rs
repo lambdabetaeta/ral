@@ -60,6 +60,9 @@ trait Fallback {
     fn remove(&self) -> Absent {
         Absent
     }
+    fn remove_all<T>(&self, _: T) -> Absent {
+        Absent
+    }
     fn rename<T>(&self, _: T) -> Absent {
         Absent
     }
@@ -111,6 +114,7 @@ fn an_unjudged_object_offers_its_trace_and_nothing_more() {
     let _: Absent = located.stage(());
     let _: Absent = located.open_data((), ());
     let _: Absent = located.remove();
+    let _: Absent = located.remove_all(());
     let _: Absent = located.rename(());
     let _: Absent = located.create_new((), ());
     let _: Absent = located.create_file(());
@@ -146,6 +150,7 @@ fn a_read_judged_object_reads_and_states_and_has_no_write_operation() {
     let _: Absent = located.stage(());
     let _: Absent = located.open_data((), ());
     let _: Absent = located.remove();
+    let _: Absent = located.remove_all(());
     let _: Absent = located.rename(());
     let _: Absent = located.create_new((), ());
     let _: Absent = located.create_file(());
@@ -188,6 +193,7 @@ fn an_installing_object_states_and_reads_nothing() {
     let _: Absent = located.stage(());
     let _: Absent = located.open_data((), ());
     let _: Absent = located.remove();
+    let _: Absent = located.remove_all(());
     let _: Absent = located.rename(());
 }
 

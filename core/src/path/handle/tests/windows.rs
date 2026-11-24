@@ -1010,10 +1010,17 @@ fn remove_takes_a_tree_by_handle() {
     let open = std::fs::File::open(tree.join("f")).unwrap();
     std::fs::write(tmp.path().join("kept"), b"kept").unwrap();
 
-    walked(&tree).remove().unwrap();
+    let err = walked(&tree).remove().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty, "{err}");
+
+    super::remove_tree(walked(&tree)).unwrap();
     assert!(!tree.exists());
     drop(open);
     assert_eq!(read_all(&tmp.path().join("kept")), "kept");
+
+    std::fs::create_dir(tmp.path().join("empty")).unwrap();
+    walked(&tmp.path().join("empty")).remove().unwrap();
+    assert!(!tmp.path().join("empty").exists());
 
     std::fs::write(tmp.path().join("one"), b"").unwrap();
     walked(&tmp.path().join("one")).remove().unwrap();

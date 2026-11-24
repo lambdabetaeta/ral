@@ -48,7 +48,7 @@ pub(crate) enum Streaming {
 /// Same-user and privileged interference are outside this guarantee.
 /// On Windows, so are attacker security handles retained from formerly unsafe
 /// ACLs: Windows does not revoke their granted rights when the ACL changes.
-/// Recursive removal requires a fresh judgment of [`Self::cleanup_target`].
+/// Tree removal requires fresh per-entry judgments starting from [`Self::cleanup_target`].
 #[must_use]
 pub struct ScopedDir {
     directory: Dir,
@@ -67,7 +67,8 @@ impl ScopedDir {
     }
 
     /// The actual held directory, not a fresh lookup of its creation name.
-    /// Judge this target before removing the tree: creation proves no ownership.
+    /// Judge this target and its descendants before removing the tree: creation
+    /// proves no ownership.
     pub fn cleanup_target(&self) -> Located {
         self.directory().into_located()
     }
@@ -102,29 +103,6 @@ impl<A: Authority> Dir<A> {
             linked: None,
             _a: PhantomData,
         }
-    }
-}
-
-impl Dir<Judged<Writing>> {
-    /// Remove everything beneath this directory, leaving it empty: each entry
-    /// located without following and removed through this handle, so a link
-    /// goes as the link and its target is never touched.  An entry gone
-    /// before its turn is gone.
-    ///
-    /// # Errors
-    /// The listing's, a locate's other than `NotFound`, an entry's removal.
-    fn empty(&self) -> io::Result<()> {
-        let names: Vec<EntryName> = self.read_dir()?.map(|entry| entry.name().clone()).collect();
-        for name in names {
-            let removed = self
-                .locate(&name, LeafMode::NoFollow)
-                .and_then(|entry| entry.marked::<Judged<Writing>>().remove());
-            match removed {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
-        }
-        Ok(())
     }
 }
 
@@ -289,30 +267,68 @@ impl Located<Judged<Writing>> {
         self.create_new(Access::Write, visibility).map(drop)
     }
 
-    /// Remove the leaf from its directory: a file or a link as the entry, a
-    /// directory with everything beneath it, each entry located without
-    /// following and removed through the handle of the directory it is in.
-    /// Takes `self`: after this the object is gone.  The tree is one object
-    /// removed under one judgment, the root's: its entries are not judged
-    /// again.  Where the host removes by handle (Windows), the leaf must have
+    /// Remove this single entry from its directory: a file, a link as the
+    /// link, or an empty directory.  Takes `self`: after this the object is
+    /// gone.  Where the host removes by handle (Windows), the leaf must have
     /// been located as a leaf: a directory the walk entered shares no delete.
     ///
     /// # Errors
     /// `NotFound` for an absent leaf, or one gone before it was removed;
-    /// `InvalidInput` for a root; the removal's, a directory that is not
-    /// empty by then included.
+    /// `InvalidInput` for a root; the removal's, including `DirectoryNotEmpty`
+    /// for a non-empty directory.
     pub fn remove(self) -> io::Result<()> {
         let (kind, name) = self.present()?;
-        if let Leaf::Dir { node, stat } = &self.leaf {
-            Dir::<Judged<Writing>> {
-                node: Arc::clone(node),
-                trace: self.trace.clone(),
-                stat: stat.clone(),
-                _a: PhantomData,
-            }
-            .empty()?;
-        }
         host::remove(self.dir(), self.handle(), name, kind)
+    }
+
+    /// Remove this entry and, if it is a directory, everything beneath it:
+    /// each descendant is located without following links and judged by
+    /// `judge` before entering or removing it.  An entry gone before its turn
+    /// is skipped.
+    ///
+    /// # Errors
+    /// `Err(io)` for `NotFound` at the target, `InvalidInput` for a root, or
+    /// any listing, locate, or removal I/O error; `Ok(Err(e))` when `judge`
+    /// refuses a descendant, leaving it and its ancestors intact.
+    pub fn remove_all<E>(
+        self,
+        mut judge: impl FnMut(Located) -> Result<Self, E>,
+    ) -> io::Result<Result<(), E>> {
+        self.remove_all_with(&mut judge)
+    }
+
+    fn remove_all_with<E>(
+        self,
+        judge: &mut impl FnMut(Located) -> Result<Self, E>,
+    ) -> io::Result<Result<(), E>> {
+        // Check before descending so a root is refused rather than emptied.
+        self.present()?;
+        match self.into_dir() {
+            Ok(dir) => {
+                let names: Vec<EntryName> =
+                    dir.read_dir()?.map(|entry| entry.name().clone()).collect();
+                for name in names {
+                    let child = match dir.locate(&name, LeafMode::NoFollow) {
+                        Ok(child) => child,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e),
+                    };
+                    let judged = match judge(child) {
+                        Ok(judged) => judged,
+                        Err(e) => return Ok(Err(e)),
+                    };
+                    match judged.remove_all_with(judge) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return Ok(Err(e)),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                dir.into_located().remove()?;
+                Ok(Ok(()))
+            }
+            Err(leaf) => leaf.remove().map(Ok),
+        }
     }
 
     /// Rename the leaf to `to` in its own directory, over whatever `to` is.

@@ -71,6 +71,14 @@ pub(super) fn writable(d: Dir) -> Dir<Judged<Writing>> {
     d.marked()
 }
 
+pub(super) fn remove_tree(l: Located<Judged<Writing>>) -> std::io::Result<()> {
+    l.remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)))
+        .map(|res| match res {
+            Ok(()) => (),
+            Err(infallible) => match infallible {},
+        })
+}
+
 /// What `excluded` holds at its name.
 fn named(excluded: &Excluded) -> &Trace {
     (excluded.holds().next())

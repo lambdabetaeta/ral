@@ -1573,7 +1573,7 @@ fn a_scoped_directory_is_private_and_judged_cleanup_removes_its_tree() {
     std::fs::write(path.join("file"), b"body").unwrap();
     std::fs::write(path.join("sub/deep/file"), b"body").unwrap();
 
-    writing(scoped.cleanup_target()).remove().unwrap();
+    super::remove_tree(writing(scoped.cleanup_target())).unwrap();
     drop(scoped);
 
     assert!(!path.exists());
@@ -1593,7 +1593,7 @@ fn a_scoped_directorys_cleanup_does_not_follow_links() {
     symlink("missing", path.join("dangling")).unwrap();
     symlink(".", path.join("cycle")).unwrap();
 
-    writing(scoped.cleanup_target()).remove().unwrap();
+    super::remove_tree(writing(scoped.cleanup_target())).unwrap();
     drop(scoped);
 
     assert!(!path.exists());
@@ -1630,7 +1630,7 @@ fn scoped_cleanup_empties_the_held_tree_not_a_rewalked_name() {
     std::fs::create_dir(&path).unwrap();
     std::fs::write(path.join("keep"), b"replacement tree").unwrap();
 
-    assert!(writing(scoped.cleanup_target()).remove().is_err());
+    assert!(super::remove_tree(writing(scoped.cleanup_target())).is_err());
     drop(scoped);
 
     assert_eq!(std::fs::read_dir(moved).unwrap().count(), 0);
@@ -2091,10 +2091,7 @@ fn remove_unlinks_links_in_a_tree_and_never_follows_them() {
     symlink("nowhere", dir.join("tree/dangling")).unwrap();
     symlink("../tree", dir.join("tree/sub/loop")).unwrap();
 
-    located_with(&dir.join("tree"), LeafMode::NoFollow)
-        .unwrap()
-        .remove()
-        .unwrap();
+    super::remove_tree(located_with(&dir.join("tree"), LeafMode::NoFollow).unwrap()).unwrap();
 
     assert!(!dir.join("tree").exists());
     assert_eq!(std::fs::read(dir.join("keep/file")).unwrap(), b"kept");
@@ -2102,8 +2099,8 @@ fn remove_unlinks_links_in_a_tree_and_never_follows_them() {
     assert_eq!(std::fs::read_dir(dir.join("keep")).unwrap().count(), 2);
 }
 
-/// A file goes, a link goes as the link whatever it leads to, and what is not
-/// there, or is no directory's entry, is refused.
+/// `remove` is single-entry: a file, link, or empty directory goes; a
+/// non-empty directory, an absent name, or the root is refused.
 #[test]
 fn remove_takes_the_entry_and_refuses_what_is_not_one() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2111,6 +2108,7 @@ fn remove_takes_the_entry_and_refuses_what_is_not_one() {
     std::fs::write(dir.join("f"), b"body").unwrap();
     std::fs::create_dir(dir.join("d")).unwrap();
     std::fs::write(dir.join("d/inside"), b"body").unwrap();
+    std::fs::create_dir(dir.join("empty")).unwrap();
     symlink("d", dir.join("to_d")).unwrap();
 
     located(&dir.join("f")).unwrap().remove().unwrap();
@@ -2126,6 +2124,19 @@ fn remove_takes_the_entry_and_refuses_what_is_not_one() {
     );
     assert!(std::fs::symlink_metadata(dir.join("to_d")).is_err());
 
+    let err = located_with(&dir.join("d"), LeafMode::NoFollow)
+        .unwrap()
+        .remove()
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+    assert_eq!(std::fs::read(dir.join("d/inside")).unwrap(), b"body");
+
+    located_with(&dir.join("empty"), LeafMode::NoFollow)
+        .unwrap()
+        .remove()
+        .unwrap();
+    assert!(!dir.join("empty").exists());
+
     let absent = located(&dir.join("absent")).unwrap();
     assert_eq!(absent.remove().unwrap_err().kind(), io::ErrorKind::NotFound);
     let root = located_with(Path::new("/"), LeafMode::NoFollow).unwrap();
@@ -2133,6 +2144,66 @@ fn remove_takes_the_entry_and_refuses_what_is_not_one() {
         root.present().map(|_| ()).unwrap_err().kind(),
         io::ErrorKind::InvalidInput
     );
+}
+
+/// `remove_all` judges every descendant: a denied subtree or a baseline-pinned
+/// binary beneath a writable directory refuses deletion and stays intact.
+#[test]
+fn remove_all_refuses_denied_and_pinned_descendants() {
+    use crate::authority::policy::{Baseline, Capabilities, FsPolicy, GrantStack, Refused};
+    use crate::path::FrozenPath;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let tree = dir.join("tree");
+    std::fs::create_dir_all(tree.join("sub")).unwrap();
+    std::fs::write(tree.join("sub/secret"), b"kept").unwrap();
+
+    let layer = crate::test_helper::layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![FrozenPath::root()],
+            write_prefixes: vec![FrozenPath::root()],
+            deny_paths: vec![FrozenPath::from_surface(
+                tree.join("sub/secret").to_str().unwrap(),
+            )],
+        }),
+        ..Capabilities::default()
+    });
+    let mut shell = crate::test_helper::core_shell();
+    shell.with_layer(layer, |shell| {
+        let target = shell
+            .judge::<Writing>(crate::test_helper::located(&tree))
+            .unwrap();
+        let refused = target
+            .remove_all(|child| shell.judge::<Writing>(child))
+            .unwrap();
+        assert!(refused.is_err(), "denied descendant must refuse removal");
+    });
+    assert_eq!(std::fs::read(tree.join("sub/secret")).unwrap(), b"kept");
+
+    let pinned_tree = dir.join("pinned");
+    std::fs::create_dir(&pinned_tree).unwrap();
+    let pinned_file = pinned_tree.join("tool");
+    std::fs::write(&pinned_file, b"pinned").unwrap();
+    let pinned_id = crate::test_helper::located(&pinned_file)
+        .trace()
+        .leaf_id()
+        .expect("file has an object id");
+    let baseline = Baseline::of_host()
+        .unwrap()
+        .with_images(None, vec![(pinned_id, crate::fact::PinnedBinary::Ral)]);
+    let open = GrantStack::root();
+    let target = open
+        .judge::<Writing, _>(&baseline, crate::test_helper::located(&pinned_tree))
+        .unwrap();
+    let refused = target
+        .remove_all(|child| open.judge::<Writing, _>(&baseline, child))
+        .unwrap();
+    assert!(matches!(
+        refused,
+        Err(Refused::Guarded(crate::fact::PinnedBinary::Ral))
+    ));
+    assert_eq!(std::fs::read(&pinned_file).unwrap(), b"pinned");
 }
 
 /// A removal is by the directory handle held: a directory that moved is

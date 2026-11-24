@@ -184,13 +184,15 @@ impl Workspace {
         let removed = shell
             .judge::<Writing>(self.cleanup.cleanup_target())
             .and_then(|target| {
-                target.remove().map_err(|e| {
-                    workspace_io(
-                        EditorWorkspaceStep::RemoveWorkspace,
-                        Some(quote_native(self.directory.real().as_path().as_os_str())),
-                        &e,
-                    )
-                })
+                target
+                    .remove_all(|child| shell.judge::<Writing>(child))
+                    .map_err(|e| {
+                        workspace_io(
+                            EditorWorkspaceStep::RemoveWorkspace,
+                            Some(quote_native(self.directory.real().as_path().as_os_str())),
+                            &e,
+                        )
+                    })?
             });
         after_cleanup(edited, removed, |edit, removal| {
             joined(shell, edit, removal)
@@ -395,6 +397,29 @@ mod tests {
                 deny_paths: vec![FrozenPath::from_surface(
                     path.parent().unwrap().to_str().unwrap(),
                 )],
+            }),
+            ..Capabilities::default()
+        });
+        shell.with_layer(layer, |shell| {
+            assert!(workspace.finish(shell, Ok(())).is_err());
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cleanup_refuses_a_denied_descendant_inside_a_writable_workspace() {
+        use ral_core::authority::policy::{Capabilities, FsPolicy};
+        use ral_core::path::FrozenPath;
+
+        let mut shell = shell();
+        let workspace = Workspace::create(&mut shell, "kept").unwrap();
+        let path = std::path::PathBuf::from(workspace.path().unwrap());
+        let layer = ral_core::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![FrozenPath::root()],
+                write_prefixes: vec![FrozenPath::root()],
+                deny_paths: vec![FrozenPath::from_surface(path.to_str().unwrap())],
             }),
             ..Capabilities::default()
         });

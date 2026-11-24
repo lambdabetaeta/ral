@@ -897,9 +897,14 @@ impl OwnDir {
 
     /// [`remove`](Self::remove), for an entry name.
     fn remove_entry(&self, name: &EntryName) -> Result<(), OwnError> {
-        match self.find(Act::Remove, name)?.remove() {
+        match self
+            .find(Act::Remove, name)?
+            .remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)))
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(infallible)) => match infallible {},
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            removed => removed.map_err(|e| self.failed(Act::Remove, name, e)),
+            Err(e) => Err(self.failed(Act::Remove, name, e)),
         }
     }
 }
