@@ -35,10 +35,6 @@ test-unit:
 bless $RAL_BLESS='1':
     cargo test -p ral --features {{features}} --test integration -- corpus::run
 
-# Check the authority API's compile-time guarantees (separate compiler invocations).
-test-types:
-    cargo test --workspace --test markers --features {{features}},ral-core/test-util,exarch/test-util -- --ignored
-
 # Rustfmt, clippy, and the source's structural laws.
 lint:
     cargo fmt --all --check
@@ -92,7 +88,7 @@ wiki *args:
     bash scripts/wiki/build.sh {{args}}
 
 # Everything GitHub CI runs that this host can.
-ci: lint doc test test-types docs ui
+ci: lint doc test docs ui
 
 # Run recipes in the Linux container, e.g. `just box lint test`.
 [unix]

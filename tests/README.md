@@ -10,7 +10,6 @@ whose top-level modules are the kinds below: `just test <kind>::` selects one.
 | cli | What does the `ral` process do: argv, env, rc, tty, signals, exit codes? | `ral` |
 | assurance | Does the OS enforce the grant? Skips without confinement; fails under `RAL_REQUIRE_SANDBOX`. | `core`, `ral` |
 | arch | Does the source text obey a structural law? | `lint/tests/arch` |
-| types | Does the compiler refuse what the authority markers have not vouched for? | `core/tests/markers.rs` |
 | ui | Do the renderer and the editor grammars behave? | `synod/ui/tests`, `editors/` |
 
 A test belongs to the first kind that can say it. A `.ral` program with stdin,
@@ -37,4 +36,5 @@ Directives are leading `# key:` lines; an unknown one-word key is an error.
     just test-unit       unit tests alone
     just bless           rewrite run/**/*.out from current output
     just lint            formatting, clippy, docs and the arch rules
-    just test-types      the markers; `just ui` and `just editors` the rest
+    just ui              the renderer's type check and tests
+    just editors         the editor grammars against their fixtures

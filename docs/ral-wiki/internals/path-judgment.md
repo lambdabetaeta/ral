@@ -98,7 +98,9 @@ vouched for it.**
   single-entry and `remove_all` judges every descendant. A descent keeps its
   authority (`Installing` to `Installing`; `Reading` and `Writing` to
   `Unjudged`, which the region judges again). So `walk(p)?.read()` does not
-  compile, in this crate or another.
+  compile, in this crate or another. `path/handle/tests/markers.rs` pins each
+  marker's operations at compile time, `clone` among them: a judged handle
+  cannot be `Clone`, since its stamp comes only from a `Verdict`.
 
 The door is `Shell::locate` (and `locate_dir`, `locate_existing`,
 `locate_if_admitted`, `judge`): walk, then `GrantStack::judge` on the transcript,

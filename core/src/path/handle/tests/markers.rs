@@ -1,6 +1,5 @@
-//! What each authority marker may and may not do, pinned from inside the
-//! crate, where the `pub(crate)` operations are in reach.  The `pub` surface's
-//! compile-fail cases are `core/tests/markers/`.
+//! What each authority marker may and may not do, its `pub(crate)`
+//! operations included.
 //!
 //! An operation is *absent* where a call on the handle finds no inherent method of
 //! its name and falls through to [`Fallback`]'s, which answers [`Absent`]:
@@ -81,6 +80,9 @@ trait Fallback {
     fn is_local(&self) -> Absent {
         Absent
     }
+    fn clone(&self) -> Absent {
+        Absent
+    }
 }
 
 impl<T> Fallback for T {}
@@ -122,6 +124,7 @@ fn an_unjudged_object_offers_its_trace_and_nothing_more() {
     let _: Absent = located.leaf_fd();
     let _: Absent = located.reopen(());
     let _: Absent = located.is_local();
+    let _: Absent = located.clone();
 }
 
 #[test]
@@ -136,6 +139,7 @@ fn an_unjudged_directory_lists_nothing_and_states_nothing() {
     let _: Absent = dir.target((), ());
     let _: Absent = dir.reopen(());
     let _: Absent = dir.is_local();
+    let _: Absent = dir.clone();
 }
 
 /// A read judgment buys bytes, metadata and a listing, and no write operation.
