@@ -14,11 +14,12 @@ path = "src/lib.rs"
 [dependencies]
 tempfile = { workspace = true }
 serde      = { workspace = true }
-serde_json = { workspace = true }
-guest-abi = { path = "../guest-abi" }
 # Pure Rust permits cross-checking without a target C toolchain; only decoding is needed.
 ruzstd = { workspace = true }
 sha2   = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+guest-abi = { path = "../guest-abi" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2               = "0.6"
@@ -28,6 +29,7 @@ block2              = "0.6"
 dispatch2           = { version = "0.3", features = ["block2"] }
 
 [target.'cfg(windows)'.dependencies]
+serde_json = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
@@ -48,5 +50,6 @@ windows-sys = { workspace = true, features = [
 libc = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 # The smoke example needs the frame protocol without search builtins.
 ral-core = { path = "../core", default-features = false }

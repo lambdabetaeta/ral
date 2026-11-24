@@ -259,17 +259,15 @@ fn probe_isatty() -> (bool, bool, bool) {
 /// Windows has no `tcsetpgrp` and shares a console between attached processes,
 /// so a console-attached shell counts as owning the foreground there.
 fn probe_foreground(stdin_tty: bool) -> bool {
-    if !stdin_tty {
-        return false;
-    }
     #[cfg(unix)]
     {
-        rustix::termios::tcgetpgrp(rustix::stdio::stdin())
-            .is_ok_and(|fg| fg == rustix::process::getpgrp())
+        stdin_tty
+            && rustix::termios::tcgetpgrp(rustix::stdio::stdin())
+                .is_ok_and(|fg| fg == rustix::process::getpgrp())
     }
     #[cfg(not(unix))]
     {
-        true
+        stdin_tty
     }
 }
 

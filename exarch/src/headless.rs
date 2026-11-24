@@ -504,7 +504,7 @@ fn run_to(
     // The account id, not a label: a label is relative to a set this banner
     // does not have, and the id is what `--provider` takes to reproduce the run;
     // `via=` prints what `--via` takes.
-    let via = p.via().map(|via| format!(" via={via}")).unwrap_or_default();
+    let via = p.via().map_or_default(|via| format!(" via={via}"));
     let _ = writeln!(
         stderr,
         "exarch: provider={} model={}{via} base={}",

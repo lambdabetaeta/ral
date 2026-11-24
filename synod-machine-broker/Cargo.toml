@@ -8,14 +8,12 @@ publish = false
 [lints]
 workspace = true
 
-[dependencies]
-vm-manager = { path = "../vm-manager" }
-
 [target.'cfg(windows)'.dependencies]
+vm-manager = { path = "../vm-manager" }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization",
     "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services",
 ] }
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 tempfile = { workspace = true }

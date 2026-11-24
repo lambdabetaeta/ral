@@ -632,7 +632,7 @@ fn redirects_admit_both_owners_and_preserve_nested_enum_tuple_paths() {
                 "Redirect",
                 CompKind::Redirect {
                     body: ret(Val::Unit),
-                    redirects: redirects.clone(),
+                    redirects,
                 },
             ),
         ] {

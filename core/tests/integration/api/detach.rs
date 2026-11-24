@@ -405,9 +405,7 @@ fn a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it() {
         "the host exited and took its survivor with it — the verb bought nothing"
     );
 
-    let so_far = std::fs::metadata(&trace)
-        .map(|m| m.len())
-        .unwrap_or_default();
+    let so_far = std::fs::metadata(&trace).map_or_default(|m| m.len());
     assert!(
         settles(|| std::fs::metadata(&trace).is_ok_and(|m| m.len() > so_far)),
         "the survivor is alive but stopped working once its host was gone"

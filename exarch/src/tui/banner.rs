@@ -280,13 +280,8 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
     ls.push(Line::default());
     ls.push(head("fidelity"));
     let prose = "An answer the model committed to the transcript.";
-    let first = |lines: Vec<Line<'static>>| {
-        lines
-            .into_iter()
-            .next()
-            .map(|line| line.spans)
-            .unwrap_or_default()
-    };
+    let first =
+        |lines: Vec<Line<'static>>| lines.into_iter().next().map_or_default(|line| line.spans);
     let sample = |f: Fidelity| first(md::render_md(prose, width, 0, f));
     let pressed = |context: u8| sample(Fidelity { context, echo: 0 });
     ls.extend(line::legend_rows(

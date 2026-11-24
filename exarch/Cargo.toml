@@ -26,7 +26,7 @@ test-util = ["ral-core/test-util"]
 ral-core   = { path = "../core", features = ["coreutils"] }
 # A Sync RefCell for the cells a desk handler reaches through Arc<dyn Host>: a conflicting borrow is same-thread reentrancy, never contention.
 atomic_refcell = "0.1"
-blake3     = "1"
+blake3     = { workspace = true }
 genai      = "0.7.3"
 value-ext  = "=0.1.5"
 url        = "=2.5.8"

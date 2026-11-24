@@ -1413,7 +1413,7 @@ fn ran(runtime: crate::Runtime, run: Run) -> (End, String) {
         RunReport::Ran {
             ending, captured, ..
         } => {
-            let stdout = captured.map(|c| c.stdout.bytes).unwrap_or_default();
+            let stdout = captured.map_or_default(|c| c.stdout.bytes);
             (ending, String::from_utf8_lossy(&stdout).into_owned())
         }
         RunReport::Static { .. } | RunReport::Checked { .. } => {

@@ -285,9 +285,7 @@ impl Picker {
     }
 
     fn caps(&self) -> ModelCaps {
-        self.highlighted_model()
-            .map(|m| (self.caps)(&m))
-            .unwrap_or_default()
+        self.highlighted_model().map_or_default(|m| (self.caps)(&m))
     }
 
     /// Whether the highlighted model admits `param`; an unknown one does.

@@ -2988,7 +2988,7 @@ mod tool_presentation_tests {
                             DataStep::Index(0usize.into()),
                             DataStep::Field(field.into()),
                         ],
-                        value.cause.clone(),
+                        value.cause,
                     ));
                 }
                 for cause in [
@@ -3034,7 +3034,7 @@ mod tool_presentation_tests {
                     vec![DataStep::Field("end".into())],
                     value.cause.clone(),
                 ));
-                generic(&failure("view", vec![], value.cause.clone()));
+                generic(&failure("view", vec![], value.cause));
             }
             generic(&failure(
                 operation,
@@ -3111,7 +3111,7 @@ mod tool_presentation_tests {
                 DataStep::Index(0usize.into()),
                 DataStep::Field(field.into()),
             ];
-            generic(&failure("edit-hash", nested.clone(), value.cause.clone()));
+            generic(&failure("edit-hash", nested.clone(), value.cause));
             generic(&failure(
                 "edit-hash",
                 nested,
@@ -3153,7 +3153,7 @@ mod tool_presentation_tests {
                         vec![DataStep::Field("arg".into())],
                         value.cause.clone(),
                     ));
-                    generic(&failure("exarch-other", vec![], value.cause.clone()));
+                    generic(&failure("exarch-other", vec![], value.cause));
                 }
             }
         }
@@ -3189,7 +3189,7 @@ mod tool_presentation_tests {
             generic(&failure(
                 operation,
                 vec![DataStep::Index(0usize.into())],
-                value.cause.clone(),
+                value.cause,
             ));
             for (subject, advice) in [
                 (Utf8Subject::Input, "use from-bytes to keep raw bytes"),

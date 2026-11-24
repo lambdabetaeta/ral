@@ -74,19 +74,19 @@ fn decode_mark(v: &FOValue) -> Mark {
     let rec = payload.as_deref().and_then(record);
     match label.as_str() {
         "text" => Mark::Text {
-            spans: rec.map(decode_spans).unwrap_or_default(),
+            spans: rec.map_or_default(decode_spans),
         },
         "measure" => rec
             .and_then(decode_measure)
             .map_or_else(|| plain_text(label), Mark::Measure),
         "fields" => Mark::Fields {
-            rows: rec.map(decode_rows).unwrap_or_default(),
+            rows: rec.map_or_default(decode_rows),
         },
         "diff" => rec
             .and_then(decode_diff)
             .unwrap_or_else(|| plain_text(label)),
         "raw" => Mark::Raw {
-            bytes: rec.map(decode_raw_bytes).unwrap_or_default(),
+            bytes: rec.map_or_default(decode_raw_bytes),
         },
         _ => plain_text(&shown(v)),
     }
@@ -158,8 +158,7 @@ fn decode_field(v: &FOValue) -> Field {
             payload
                 .as_deref()
                 .and_then(record)
-                .map(decode_spans)
-                .unwrap_or_default(),
+                .map_or_default(decode_spans),
         ),
         // A nested `measure` is read for its readout alone: the row's own label
         // names it, so a `label` written here is dropped like any other field

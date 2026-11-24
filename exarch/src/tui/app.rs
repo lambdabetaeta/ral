@@ -877,8 +877,7 @@ impl App {
     pub(in crate::tui) fn latest_reply(&self) -> String {
         self.tabs
             .focused_scrollback()
-            .map(Scrollback::latest_reply_md)
-            .unwrap_or_default()
+            .map_or_default(Scrollback::latest_reply_md)
     }
 }
 

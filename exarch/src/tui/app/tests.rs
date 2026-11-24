@@ -449,7 +449,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
             "test-model",
             Script::new().then(Reply::text("still usable")),
         );
-        set_provider(&mut parent, provider.clone());
+        set_provider(&mut parent, provider);
         assert!(matches!(
             parent.deliberate(
                 &DurableRoot::default().child(),

@@ -18,8 +18,7 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .map(|s| format!("+{s}"))
-        .unwrap_or_default();
+        .map_or_default(|s| format!("+{s}"));
     println!("cargo:rustc-env=RAL_VERSION_SUFFIX={suffix}");
 
     // Windows gives the main thread 1 MiB; the recursive front end needs the

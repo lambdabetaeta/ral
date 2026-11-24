@@ -60,8 +60,6 @@ shlex         = { workspace = true }
 ignore        = "0.4"
 fastrand      = { workspace = true }
 getrandom     = "0.4"
-cap-primitives = { workspace = true }
-cap-fs-ext    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 base64        = { workspace = true }
@@ -162,6 +160,8 @@ seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"
+cap-primitives = { workspace = true }
+cap-fs-ext   = { workspace = true }
 windows-sys  = { workspace = true, features = [
     # NtCreateFile: component-wise opens relative to a held parent directory.
     "Wdk_Foundation",

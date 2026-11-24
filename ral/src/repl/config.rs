@@ -68,8 +68,7 @@ impl Typed for Surface {
 impl Datum for Surface {
     fn encode(self) -> FOValue {
         clap::ValueEnum::to_possible_value(&self)
-            .map(|v| v.get_name().to_string())
-            .unwrap_or_default()
+            .map_or_default(|v| v.get_name().to_string())
             .encode()
     }
 

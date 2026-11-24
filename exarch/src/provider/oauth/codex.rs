@@ -505,9 +505,7 @@ mod tests {
             (Some("3"), 3),
             (Some("\" 4 \""), 4),
         ] {
-            let suffix = interval
-                .map(|v| format!(",\"interval\":{v}"))
-                .unwrap_or_default();
+            let suffix = interval.map_or_default(|v| format!(",\"interval\":{v}"));
             let code: UserCode = serde_json::from_str(&format!(
                 "{{\"device_auth_id\":\"d\",\"usercode\":\"u\"{suffix}}}"
             ))

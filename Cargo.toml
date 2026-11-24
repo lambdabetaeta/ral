@@ -58,9 +58,9 @@ ruzstd     = "0.9"
 blake3     = "1"
 tempfile   = "3.27"
 fastrand   = "2"
-# Directory-handle-relative filesystem primitives (`openat` and kin) on Unix
-# and Windows alike; `cap-fs-ext` carries the `follow` switch on
-# `OpenOptions` that `cap-primitives` keeps behind an extension trait.
+# Directory-handle-relative filesystem primitives (`openat` and kin) on
+# Windows, where Unix's walk calls rustix; `cap-fs-ext` carries the `follow`
+# switch on `OpenOptions` that `cap-primitives` keeps behind an extension trait.
 cap-primitives = "4"
 cap-fs-ext = { version = "4", default-features = false }
 # The window's half of the seam: `serde-compat` is the whole point, so the
@@ -86,6 +86,9 @@ nursery = { level = "warn", priority = -1 }
 #   items_after_statements — a local `fn`/`const` beside its use is a locality idiom.
 #   too_many_lines — splitting for a line count alone harms readable dispatch/draw code.
 #   similar_names / many_single_char_names — intentional domain pairs and math locals.
+#   empty_enums — an empty enum is a type-level tag eliminated by `match x {}`;
+#     a `struct T(!)` would expose its field to every eliminator, and serde
+#     implements nothing for `!` on stable.
 # The vendored crate (vendor/ripgrep-core) does not inherit these lints.
 must_use_candidate = "allow"
 return_self_not_must_use = "allow"
@@ -96,6 +99,7 @@ items_after_statements = "allow"
 too_many_lines = "allow"
 similar_names = "allow"
 many_single_char_names = "allow"
+empty_enums = "allow"
 disallowed_methods = "deny"
 
 # These docs cite symbols constantly, so a citation has to be checkable.

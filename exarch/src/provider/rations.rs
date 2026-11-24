@@ -121,8 +121,7 @@ impl Rations {
         self.accounts
             .lock_ignore_poison()
             .get(account)
-            .map(|standing| standing.reading.clone())
-            .unwrap_or_default()
+            .map_or_default(|standing| standing.reading.clone())
     }
 
     /// The windows of `account`'s last reading that newly reach a rung of

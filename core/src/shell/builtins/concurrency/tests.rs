@@ -611,7 +611,7 @@ fn run_framed(
             ending, captured, ..
         } => (
             ending.into_settled(),
-            captured.map(|c| c.stdout.bytes).unwrap_or_default(),
+            captured.map_or_default(|c| c.stdout.bytes),
         ),
         RunReport::Checked { .. } => panic!("source fixture must run, not only check: {src}"),
         RunReport::Static { diagnostics, .. } => panic!(

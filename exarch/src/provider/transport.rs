@@ -382,8 +382,7 @@ mod tests {
             let adapter = login.service().model_protocol.default_adapter();
             let state = ral_core::own::OwnDir::for_test("auth-resolver").unwrap();
             let cell = oauth::commit_for_test(&state, &token(login, "old"));
-            let AuthResolver::ResolverFn(resolver) = oauth_auth_resolver(adapter, cell.clone())
-            else {
+            let AuthResolver::ResolverFn(resolver) = oauth_auth_resolver(adapter, cell) else {
                 panic!("OAuth uses a synchronous cell resolver");
             };
             let resolve = |kind| resolver.exec_fn(ModelIden::new(kind, "m")).unwrap();

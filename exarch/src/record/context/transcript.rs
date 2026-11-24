@@ -512,14 +512,12 @@ fn transcript_program(call: &ToolCall) -> TranscriptPart {
     let keys = call
         .fn_arguments
         .as_object()
-        .map(|args| args.keys().cloned().collect())
-        .unwrap_or_default();
+        .map_or_default(|args| args.keys().cloned().collect());
     let source = if call.fn_name == RAL_TOOL {
         call.fn_arguments
             .get(COMMAND)
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_default()
+            .map_or_default(str::to_string)
     } else {
         String::new()
     };
@@ -554,8 +552,7 @@ fn transcript_custom(custom: &CustomPart) -> TranscriptPart {
     let (provider, model) = custom
         .model_iden
         .as_ref()
-        .map(|iden| (iden.adapter_kind.to_string(), iden.model_name.to_string()))
-        .unwrap_or_default();
+        .map_or_default(|iden| (iden.adapter_kind.to_string(), iden.model_name.to_string()));
     TranscriptPart::Custom { provider, model }
 }
 

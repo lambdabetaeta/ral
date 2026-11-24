@@ -1916,7 +1916,7 @@ mod process {
                 error.reason,
                 not_runnable(&shown, Unrunnable::PermissionDenied)
             );
-            let hint = error.hints().first().map(|h| &**h).unwrap_or_default();
+            let hint = error.hints().first().map_or_default(|h| &**h);
             assert!(
                 hint.contains("its interpreter /bin/sh is not admitted"),
                 "{hint}"

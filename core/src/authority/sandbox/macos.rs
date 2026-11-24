@@ -175,8 +175,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, Launch
     let pinned = rendered
         .fs
         .lists()
-        .map(|l| l.pinned_dirs.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|l| l.pinned_dirs.as_slice());
     // Ral's own file is unwritable and its path unrenameable, whatever the
     // grant: a swap between the parent's check and the re-exec would never
     // enter Seatbelt.

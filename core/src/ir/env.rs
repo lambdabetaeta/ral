@@ -288,7 +288,8 @@ mod tests {
                 assert_eq!(env.get(name), Some(&binding.value));
             }
             assert_eq!(env.addr().is_none(), count == 0);
-            assert_eq!(env.addr(), env.clone().addr());
+            let clone = env.clone();
+            assert_eq!(env.addr(), clone.addr());
             assert_eq!(
                 env.addr(),
                 env.restrict(&crate::ir::test_occ(

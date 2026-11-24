@@ -968,7 +968,7 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
                     "exarch-agents `reply 'done'",
                 )])),
         );
-        set_provider(&mut session, provider.clone());
+        set_provider(&mut session, provider);
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id());
         let outcome = session.deliberate(&exchange, Some(("go".into(), Voice::Human)), None, &emit);
@@ -1158,7 +1158,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
                     "exarch-agents `reply 'second'",
                 )])),
         );
-        set_provider(&mut child, provider.clone());
+        set_provider(&mut child, provider);
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, child.id());
         let outcome = child.deliberate(

@@ -91,9 +91,7 @@ impl Drop for Flow {
 fn callback_retains_code_and_optional_issued_client() {
     for client in [None, Some("oaiapp_issued")] {
         let flow = Flow::new(TEST_POLICY);
-        let extra = client
-            .map(|id| format!("&client_id={id}"))
-            .unwrap_or_default();
+        let extra = client.map_or_default(|id| format!("&client_id={id}"));
         let page = flow.callback(&format!("state=expected&code=auth-code{extra}"));
         assert!(page.starts_with(b"HTTP/1.1 200"));
         let received = flow.finish().unwrap();

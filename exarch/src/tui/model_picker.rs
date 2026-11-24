@@ -106,8 +106,7 @@ pub(super) fn pick_model(app: &mut App, ctx: &CommandCtx<'_>) {
     let tuning = app
         .tabs
         .focused_row()
-        .map(|row| row.selected.tuning)
-        .unwrap_or_default();
+        .map_or_default(|row| row.selected.tuning);
     let Some(session) = open(ctx.bureau, ctx.bureau.available(), &tuning) else {
         return;
     };

@@ -102,20 +102,14 @@ impl Sources<'_> {
     /// misinform a menu, never misdirect a spawn.
     fn command_names(&self) -> Vec<&String> {
         let scan = self.cache.scan.get_or_init(|| PathScan {
-            names: self
-                .cache
-                .key
-                .path
-                .as_deref()
-                .map(|path| {
-                    let cwd = CwdPath::new(self.cache.key.cwd.clone()).ok();
-                    ral_core::path::path_dirs(path, cwd.as_ref())
-                        .into_iter()
-                        .flat_map(|dir| entries(self.engine, &dir))
-                        .filter_map(|e| e.exec.then_some(e.name))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            names: self.cache.key.path.as_deref().map_or_default(|path| {
+                let cwd = CwdPath::new(self.cache.key.cwd.clone()).ok();
+                ral_core::path::path_dirs(path, cwd.as_ref())
+                    .into_iter()
+                    .flat_map(|dir| entries(self.engine, &dir))
+                    .filter_map(|e| e.exec.then_some(e.name))
+                    .collect()
+            }),
             taken: Instant::now(),
         });
         let mut names: Vec<&String> = scan
