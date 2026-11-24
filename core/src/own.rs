@@ -747,7 +747,7 @@ impl OwnDir {
     /// a link as the link.  Nothing is followed; nothing there is no error.
     ///
     /// # Errors
-    /// The removal's.
+    /// The removal's, at the real path of the entry it failed at.
     pub fn remove(&self, name: &str) -> Result<(), OwnError> {
         self.remove_entry(&self.entry(Act::Remove, name)?)
     }
@@ -897,14 +897,11 @@ impl OwnDir {
 
     /// [`remove`](Self::remove), for an entry name.
     fn remove_entry(&self, name: &EntryName) -> Result<(), OwnError> {
-        match self
-            .find(Act::Remove, name)?
-            .remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)))
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(infallible)) => match infallible {},
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(self.failed(Act::Remove, name, e)),
+        let Ok(removed) = (self.find(Act::Remove, name)?)
+            .remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)));
+        match removed {
+            Err((_, e)) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed.map_err(|(at, e)| io_at(Act::Remove, at.as_path(), e)),
         }
     }
 }

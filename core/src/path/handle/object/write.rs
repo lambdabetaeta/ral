@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use super::super::error::directory_error;
 use super::{
-    Authority, Data, Dir, EntryName, Kind, Leaf, LeafMode, Located, Node, Sharing, StagedWrite,
-    Stamp, Streamed, Trace, Writing, host, step_into,
+    Authority, Data, Dir, EntryName, Kind, Leaf, LeafMode, Located, Node, RealPath, Sharing,
+    StagedWrite, Stamp, Streamed, Trace, Writing, host, step_into,
 };
 
 /// What a data open is for: [`Located::open_data`]'s argument, and what each
@@ -47,7 +47,8 @@ pub(crate) enum Streaming {
 /// Same-user and privileged interference are outside this guarantee.
 /// On Windows, so are attacker security handles retained from formerly unsafe
 /// ACLs: Windows does not revoke their granted rights when the ACL changes.
-/// Tree removal requires fresh per-entry judgments starting from [`Self::cleanup_target`].
+/// Tree removal requires fresh per-entry judgments starting from
+/// [`Self::cleanup_target`].
 #[must_use]
 pub struct ScopedDir {
     directory: Dir,
@@ -283,49 +284,54 @@ impl Located<Writing> {
     /// Remove this entry and, if it is a directory, everything beneath it:
     /// each descendant is located without following links and judged by
     /// `judge` before entering or removing it.  An entry gone before its turn
-    /// is skipped.
+    /// is skipped.  Where the host removes by handle (Windows), this entry
+    /// must have been located as a leaf, as for [`remove`](Self::remove); its
+    /// descendants are.
     ///
     /// # Errors
-    /// `Err(io)` for `NotFound` at the target, `InvalidInput` for a root, or
-    /// any listing, locate, or removal I/O error; `Ok(Err(e))` when `judge`
-    /// refuses a descendant, leaving it and its ancestors intact (siblings
-    /// visited before the refusal may already have been removed).
+    /// `Err(e)` when `judge` refuses a descendant, leaving it and its
+    /// ancestors intact (siblings visited before it may already be gone);
+    /// `Ok(Err((at, io)))` for an I/O failure at `at`, the entry it concerns:
+    /// `NotFound` at the target, `InvalidInput` for a root, or a listing's,
+    /// a locate's or a removal's error.
     pub fn remove_all<E>(
         self,
         mut judge: impl FnMut(Located) -> Result<Self, E>,
-    ) -> io::Result<Result<(), E>> {
+    ) -> Result<Result<(), (RealPath, io::Error)>, E> {
         // Check once before descending so a root is refused rather than emptied.
-        self.present()?;
+        if let Err(e) = self.present() {
+            return Ok(Err((self.real().clone(), e)));
+        }
         self.remove_all_with(&mut judge)
     }
 
     fn remove_all_with<E>(
         self,
         judge: &mut impl FnMut(Located) -> Result<Self, E>,
-    ) -> io::Result<Result<(), E>> {
-        match self.into_dir() {
+    ) -> Result<Result<(), (RealPath, io::Error)>, E> {
+        let entry = match self.into_dir() {
             Ok(dir) => {
-                for entry in dir.read_dir()? {
-                    let child = match dir.locate(entry.name(), LeafMode::NoFollow) {
-                        Ok(child) => child,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                        Err(e) => return Err(e),
+                let names = match host::names(&dir.node.held.file) {
+                    Ok(names) => names,
+                    Err(e) => return Ok(Err((dir.real().clone(), e))),
+                };
+                for name in names {
+                    let removed = match dir.locate(&name, LeafMode::NoFollow) {
+                        Ok(child) => judge(child)?.remove_all_with(judge)?,
+                        Err(e) => Err((dir.real().child(&name), e)),
                     };
-                    let judged = match judge(child) {
-                        Ok(judged) => judged,
-                        Err(e) => return Ok(Err(e)),
-                    };
-                    match judged.remove_all_with(judge) {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => return Ok(Err(e)),
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(e),
+                    if let Err((at, e)) = removed
+                        && e.kind() != io::ErrorKind::NotFound
+                    {
+                        return Ok(Err((at, e)));
                     }
                 }
-                dir.into_located().remove().map(Ok)
+                dir.into_located()
             }
-            Err(leaf) => leaf.remove().map(Ok),
-        }
+            Err(leaf) => leaf,
+        };
+        let at = entry.real().clone();
+        Ok(entry.remove().map_err(|e| (at, e)))
     }
 
     /// Rename the leaf to `to` in its own directory, over whatever `to` is.

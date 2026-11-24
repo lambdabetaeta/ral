@@ -185,14 +185,14 @@ impl Workspace {
             .judge::<Writing>(self.cleanup.cleanup_target())
             .and_then(|target| {
                 target
-                    .remove_all(|child| shell.judge::<Writing>(child))
-                    .map_err(|e| {
+                    .remove_all(|child| shell.judge::<Writing>(child))?
+                    .map_err(|(at, e)| {
                         workspace_io(
                             EditorWorkspaceStep::RemoveWorkspace,
-                            Some(quote_native(self.directory.real().as_path().as_os_str())),
+                            Some(quote_native(at.as_path().as_os_str())),
                             &e,
                         )
-                    })?
+                    })
             });
         after_cleanup(edited, removed, |edit, removal| {
             joined(shell, edit, removal)

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed288c17
+generated_at_commit: a6493c0a
 generated_at_date: 2026-11-24
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/load/profile.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -343,8 +343,11 @@ are named through them and re-exported nowhere.
   `object/`, traversal in `resolve.rs`, and host adapters are its child modules.
   `object/write.rs::create_scoped_dir` creates a secret directory through a
   write-judged absent target; `ScopedDir` holds it and permits only empty-root
-  rollback on drop. Recursive cleanup requires a fresh write judgment of
-  `cleanup_target`, the actual held tree, not its original absent name.
+  rollback on drop. Recursive cleanup (`Located::remove_all`) requires a fresh
+  write judgment of `cleanup_target`, the actual held tree, not its original
+  absent name, and of every descendant before it is entered or removed. A
+  refused descendant stops the removal and stays, with its ancestors; an I/O
+  failure names the entry it happened at.
   `create_writable_file` exclusively creates a secret or public regular file
   without requiring read authority. Scoped creation validates physical Unix
   ancestors through held `..` handles: current-user/root ownership, no

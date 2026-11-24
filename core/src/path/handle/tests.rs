@@ -72,11 +72,8 @@ pub(super) fn writable(d: Dir) -> Dir<Writing> {
 }
 
 pub(super) fn remove_tree(l: Located<Writing>) -> std::io::Result<()> {
-    l.remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)))
-        .map(|res| match res {
-            Ok(()) => (),
-            Err(infallible) => match infallible {},
-        })
+    let Ok(removed) = l.remove_all(|child| Ok::<_, std::convert::Infallible>(writing(child)));
+    removed.map_err(|(_, e)| e)
 }
 
 /// What `excluded` holds at its name.
@@ -94,6 +91,8 @@ mod holds;
 mod macos;
 #[path = "tests/markers.rs"]
 mod markers;
+#[path = "tests/remove.rs"]
+mod remove;
 #[cfg(unix)]
 #[path = "tests/unix.rs"]
 mod unix;

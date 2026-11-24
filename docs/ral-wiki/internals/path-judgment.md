@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ed288c17
+verified_at_commit: a6493c0a
 verified_at_date: 2026-11-24
 anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Vouched, Reading, Writing, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
 ---
@@ -79,8 +79,9 @@ vouched for it.**
   `launch`, `open_write`). Nothing holds a handle longer than the operation
   it was walked for.
 - **The marker is the voucher.** Four flat markers — `Unjudged`, `Reading`,
-  `Writing`, and crate-private `Installing` — sit in one sealed chain,
-  `Authority` ← `Vouched` ← `Op`, with marker minting confined to `mod stamp`.
+  `Writing`, and crate-private `Installing` — are bounded by one sealed chain
+  of traits, `Authority`, `Vouched`, `Op`, each refining the last, with marker
+  minting confined to `mod stamp`.
   `Unjudged` is what the walk returns and offers its trace and nothing more.
   `Reading` and `Writing` (the `Op`s) are minted by `Handle::judged` alone,
   against a `Verdict` only `authority/policy/fs.rs` makes. `Handle` is the

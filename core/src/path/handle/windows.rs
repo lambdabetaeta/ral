@@ -1112,7 +1112,7 @@ pub(super) fn open_discard() -> io::Result<File> {
 /// The names of `dir`, read through a reopened listing handle and sorted.
 /// Enumeration's metadata is not used: it can predate a writer's latest
 /// append, or describe an entry gone before the iterator reaches it.
-fn names(dir: &File) -> io::Result<Vec<EntryName>> {
+pub(super) fn names(dir: &File) -> io::Result<Vec<EntryName>> {
     let reader = reopen(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
     let mut names = Vec::new();
     let mut class = FileIdBothDirectoryRestartInfo;

@@ -2145,74 +2145,16 @@ fn remove_takes_the_entry_and_refuses_what_is_not_one() {
         io::ErrorKind::InvalidInput
     );
     let mut called = false;
-    let err = root
+    let (at, err) = root
         .remove_all(|_| {
             called = true;
             Err(())
         })
+        .unwrap()
         .unwrap_err();
+    assert_eq!(at.as_path(), Path::new("/"));
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     assert!(!called);
-}
-
-/// `remove_all` judges every descendant: a denied subtree or a baseline-pinned
-/// binary beneath a writable directory refuses deletion and stays intact.
-#[test]
-fn remove_all_refuses_denied_and_pinned_descendants() {
-    use crate::authority::policy::{Baseline, Capabilities, FsPolicy, GrantStack, Refused};
-    use crate::path::FrozenPath;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    let tree = dir.join("tree");
-    std::fs::create_dir_all(tree.join("sub")).unwrap();
-    std::fs::write(tree.join("sub/secret"), b"kept").unwrap();
-
-    let layer = crate::test_helper::layer(Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::root()],
-            write_prefixes: vec![FrozenPath::root()],
-            deny_paths: vec![FrozenPath::from_surface(
-                tree.join("sub/secret").to_str().unwrap(),
-            )],
-        }),
-        ..Capabilities::default()
-    });
-    let mut shell = crate::test_helper::core_shell();
-    shell.with_layer(layer, |shell| {
-        let target = shell
-            .judge::<Writing>(crate::test_helper::located(&tree))
-            .unwrap();
-        let refused = target
-            .remove_all(|child| shell.judge::<Writing>(child))
-            .unwrap();
-        assert!(refused.is_err(), "denied descendant must refuse removal");
-    });
-    assert_eq!(std::fs::read(tree.join("sub/secret")).unwrap(), b"kept");
-
-    let pinned_tree = dir.join("pinned");
-    std::fs::create_dir(&pinned_tree).unwrap();
-    let pinned_file = pinned_tree.join("tool");
-    std::fs::write(&pinned_file, b"pinned").unwrap();
-    let pinned_id = crate::test_helper::located(&pinned_file)
-        .trace()
-        .leaf_id()
-        .expect("file has an object id");
-    let baseline = Baseline::of_host()
-        .unwrap()
-        .with_images(None, vec![(pinned_id, crate::fact::PinnedBinary::Ral)]);
-    let open = GrantStack::root();
-    let target = open
-        .judge::<Writing, _>(&baseline, crate::test_helper::located(&pinned_tree))
-        .unwrap();
-    let refused = target
-        .remove_all(|child| open.judge::<Writing, _>(&baseline, child))
-        .unwrap();
-    assert!(matches!(
-        refused,
-        Err(Refused::Guarded(crate::fact::PinnedBinary::Ral))
-    ));
-    assert_eq!(std::fs::read(&pinned_file).unwrap(), b"pinned");
 }
 
 /// A removal is by the directory handle held: a directory that moved is

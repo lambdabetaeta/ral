@@ -137,13 +137,13 @@ mod private {
 /// Who vouched for a held handle, and so what may be done through it.
 ///
 /// [`Unjudged`]: nobody, what the walk returns.  [`Reading`] and [`Writing`]:
-/// an fs door, made by [`Handle::judged`] against a [`Verdict`], whose field is
-/// private to `authority/policy/fs.rs`.  [`Installing`]: the OS sandbox side,
-/// at a position it is installing rules at; made by the two
+/// an fs judgment, made by [`Handle::judged`] against a [`Verdict`], whose
+/// field is private to `authority/policy/fs.rs`.  [`Installing`]: the OS
+/// sandbox side, at a position it is installing rules at; made by the two
 /// `RealPath::open_*_nofollow` against an `InstallToken`, whose field is
-/// private to `sandbox.rs`.  Capabilities form a linear chain: [`Authority`] ->
-/// [`Vouched`] (metadata, listing, descent) -> [`Op`] (reads) -> [`Writing`]
-/// (writes).  Sealed.
+/// private to `sandbox.rs`.  Each bound refines the last: [`Vouched`] stats,
+/// lists and descends, [`Op`] also reads bytes, and `Writing` alone writes.
+/// Sealed.
 pub trait Authority: private::Sealed {}
 
 /// Nobody has vouched: what the walk returns.
@@ -168,8 +168,8 @@ impl Authority for Reading {}
 impl Authority for Writing {}
 impl Authority for Installing {}
 
-/// Vouched for metadata, listing, and descent: either an fs door or the sandbox
-/// installer.
+/// Vouched for metadata, listing, and descent: by an fs judgment or by the
+/// sandbox installer.
 ///
 /// `Child` is what a descent is marked: the sandbox side keeps its authority,
 /// since it has no judge to ask again and renders a denied tree too; a judged
