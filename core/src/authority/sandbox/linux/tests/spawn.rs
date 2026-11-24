@@ -616,6 +616,54 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
     );
 }
 
+/// A fork elsewhere in ral, taken while the parent still holds the report's
+/// writer, keeps a copy of it until its `execve`.  That copy, open when
+/// bwrap is reaped, never writes: the supervisor's death still reads as its
+/// signal.
+#[test]
+fn a_stray_writer_cannot_hide_a_supervisors_death() {
+    use crate::process::{CancelCause, DurableRoot, Forked, fork, reap};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    if envelope_launches(&unrestricted()).is_none() {
+        return;
+    }
+    let scope = DurableRoot::default().child();
+    let (stop, stopped) = channel::<()>();
+    let outcome = std::thread::scope(|threads| {
+        threads.spawn(move || {
+            let mut strays = Vec::new();
+            while matches!(
+                stopped.recv_timeout(Duration::from_millis(2)),
+                Err(RecvTimeoutError::Timeout)
+            ) {
+                // SAFETY: only `usleep` and `_exit` run in the child.
+                match unsafe { fork() }.expect("fork a stray") {
+                    Forked::Child => unsafe {
+                        libc::usleep(300_000);
+                        libc::_exit(0)
+                    },
+                    Forked::Parent(pid) => strays.push(pid),
+                }
+            }
+            for pid in strays {
+                reap(pid).expect("reap a stray");
+            }
+        });
+        let (spawned, _, shell) = spawn_confined("sleep 30", &scope);
+        scope.cancel(CancelCause::Aborted);
+        let (outcome, _) = crate::shell::exec::pipeline::lone_end(spawned, &shell);
+        drop(stop);
+        outcome
+    });
+    assert_eq!(
+        outcome,
+        signaled(libc::SIGKILL),
+        "a stray copy of the report's writer never writes: bwrap's 137 is its supervisor's death"
+    );
+}
+
 /// An enveloped start claims its program by the host pid a deny line would
 /// carry, read beneath the payload as it runs; never bwrap's monitor, which
 /// no deny-set confines.

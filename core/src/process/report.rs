@@ -162,15 +162,23 @@ impl Testimony {
 
     /// The program's end as its supervisor told it, else `envelope`, bwrap's
     /// own: a `128 + n` there with nothing told is the supervisor's death by
-    /// `n`, and nothing else exits so silently.  Never waits, being read on
-    /// the reaper's thread: a writer still open leaves `envelope` as it is.
+    /// `n`, and nothing else exits so silently.  bwrap is reaped only after
+    /// its supervisor, so what is buffered then is all that was ever told: a
+    /// writer still open is a stray copy a concurrent fork took before its
+    /// `execve`, which never writes.  So the buffer is read as final, without
+    /// waiting, on the reaper's thread.
     #[cfg(target_os = "linux")]
     pub(crate) fn amend(mut self, envelope: super::WaitOutcome) -> super::WaitOutcome {
         use super::{Signal, WaitOutcome};
-        if self.0.set_nonblocking(true).is_err() {
+        let mut told = Vec::new();
+        let drained = self
+            .0
+            .set_nonblocking(true)
+            .and_then(|()| self.0.read_to_end(&mut told));
+        if drained.is_err_and(|e| e.kind() != io::ErrorKind::WouldBlock) {
             return envelope;
         }
-        match Record::read(&mut self.0) {
+        match Record::read(&mut told.as_slice()) {
             Ok(Some(Record::Ended(status))) => WaitOutcome::from_exit_status(status),
             Ok(None) => match envelope {
                 WaitOutcome::Exited(code) => {
@@ -298,8 +306,8 @@ mod tests {
     }
 
     /// The end is read without waiting: what the supervisor told, else a
-    /// silent supervisor's own signal death, else, with a writer still open,
-    /// bwrap's status as it is.
+    /// silent supervisor's own signal death, whether or not a stray writer
+    /// is still open.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_end_is_amended_by_what_was_told_and_never_waited_for() {
@@ -324,7 +332,12 @@ mod tests {
             WaitOutcome::Signaled(Signal::new(libc::SIGKILL))
         );
         let (open, _writer) = told(&[]);
-        assert_eq!(open.amend(bwrap), bwrap);
+        assert_eq!(
+            open.amend(bwrap),
+            WaitOutcome::Signaled(Signal::new(libc::SIGKILL))
+        );
+        let (open, _writer) = told(&[Record::Ended(ExitStatus::from_raw(3 << 8))]);
+        assert_eq!(open.amend(bwrap), WaitOutcome::Exited(3));
     }
 
     #[test]

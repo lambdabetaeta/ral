@@ -15,9 +15,17 @@ outcome that is already what happened (`core/src/process/child.rs`,
   `ended` before it exits, so a silent report under an envelope that exited
   `128 + n` is the supervisor killed by `n` (`SIGKILL` to the group is the
   case). Any other exit with no record stays as it is.
-- **The report is read without waiting.** The amendment runs on the reaper's
-  thread, which must never block: a writer still open leaves the envelope's
-  outcome as it is.
+- **The report is read as final, without waiting.** The amendment runs on the
+  reaper's thread, which must never block, so it drains what is buffered and
+  reads that. Nothing more can come: bwrap is reaped only after its
+  supervisor. Its monitor and pid 1 close their extra descriptors; the
+  supervisor's copy closes in the kernel's `exit_files`, before
+  `exit_notify`; a dying namespace init reaps every member before it is
+  reaped itself; without a pid namespace the monitor waits for the supervisor.
+  A writer still open then is a stray close-on-exec copy that a concurrent
+  fork in ral took while the parent held its writer (`issue` to
+  `Report::forked`), in a child not yet at its `execve`. It never writes, so
+  it cannot hide a death (`a_stray_writer_cannot_hide_a_supervisors_death`).
 - **macOS needs none.** The program replaced the trampoline, and its status is
   the child's own.
 
