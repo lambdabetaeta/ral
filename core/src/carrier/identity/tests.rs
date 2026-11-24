@@ -32,15 +32,17 @@ mod identity_cancel_tests {
         let worker = {
             let transport = transport.clone();
             std::thread::spawn(move || {
-                transport.dispatch(
-                    DispatchId(1),
-                    crate::protocol::Run::captured(
-                        format!("{SLEEP} 30"),
-                        crate::source::SourceOrigin::named("<test>"),
-                    ),
-                    &(Arc::new(()) as Arc<dyn Host>),
-                    None,
-                );
+                transport
+                    .dispatch(
+                        DispatchId(1),
+                        crate::protocol::Run::captured(
+                            format!("{SLEEP} 30"),
+                            crate::source::SourceOrigin::named("<test>"),
+                        ),
+                        &(Arc::new(()) as Arc<dyn Host>),
+                        None,
+                    )
+                    .expect("a fresh identity accepts the dispatch");
             })
         };
 
@@ -645,6 +647,27 @@ mod probe_tests {
             None,
         );
         assert_eq!(refused, Err(first));
+    }
+
+    /// A scoped drain polls rather than blocks, so a refused dispatch must say
+    /// so itself: it answers the cause and queues no event to wait on.
+    #[test]
+    fn a_severed_identity_refuses_a_scoped_dispatch_outright() {
+        let transport = fresh();
+        let cause = transport.sever(Severed::Faulted(
+            crate::fact::ConnectionFault::ReadingForDispatch,
+        ));
+        let within = crate::process::DurableRoot::default().child();
+        assert_eq!(
+            transport.dispatch(
+                DispatchId(1),
+                Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
+                &(Arc::new(()) as Arc<dyn Host>),
+                Some(&within),
+            ),
+            Err(cause)
+        );
+        assert!(transport.events().try_recv().is_none());
     }
 
     /// A child is narrowed under the parent's own installer, which here has

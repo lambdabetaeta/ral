@@ -97,12 +97,19 @@ mod typed_readings {
         fn ends(&self) -> &Ends {
             &self.ends
         }
-        fn dispatch(&self, id: DispatchId, _: Run, _: &Arc<dyn Host>, _: Option<&Scope>) {
+        fn dispatch(
+            &self,
+            id: DispatchId,
+            _: Run,
+            _: &Arc<dyn Host>,
+            _: Option<&Scope>,
+        ) -> Result<(), Severed> {
             self.ends
                 .events
                 .stash
                 .lock_ignore_poison()
                 .push_back((id, Event::Reading(Ok(self.answer.clone()))));
+            Ok(())
         }
         fn probe(&self, _: &Probe) -> Result<FOValue, ProbeError> {
             Ok(self.answer.clone())

@@ -213,7 +213,18 @@ pub trait Transport: Send + Sync {
     /// is the host's side of this run; see [`dispatch_to_report`] for how each
     /// transport uses it. `within` parents the identity run's scope; the wire
     /// dispatch loop carries its cancellation as controls.
-    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>, within: Option<&Scope>);
+    ///
+    /// # Errors
+    /// The severance already standing, which refuses the run: nothing for `id`
+    /// follows. `Ok` promises the event stream `id`'s `Report`, or its
+    /// disconnect if the transport severs first.
+    fn dispatch(
+        &self,
+        id: DispatchId,
+        run: Run,
+        host: &Arc<dyn Host>,
+        within: Option<&Scope>,
+    ) -> Result<(), Severed>;
 
     /// Read session state at a run boundary, synchronously. The typed methods
     /// below are the way to ask.
@@ -486,9 +497,6 @@ pub fn dispatch_to_report(
     within: Option<&Scope>,
 ) -> Result<Report, Severed> {
     let _dispatching = Dispatching::enter(transport);
-    if let Some(cause) = transport.severed() {
-        return Err(cause);
-    }
     let id = mint_dispatch_id();
     let _aimed = transport.control().aim(id);
 
@@ -503,7 +511,7 @@ pub fn dispatch_to_report(
     };
     // A strike can precede its dispatch: the engine opens it born cancelled.
     strike();
-    transport.dispatch(id, run, &host, within);
+    transport.dispatch(id, run, &host, within)?;
 
     loop {
         let received = match within {

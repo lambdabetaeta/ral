@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9290eb03
-generated_at_date: 2026-11-13
+generated_at_commit: 3a8620e3
+generated_at_date: 2026-11-24
 ---
 
 # The engine protocol
@@ -495,6 +495,13 @@ Exarch binds each agent's life, so a lost engine stops its owner's work at once.
 The reader thread that watches a wire connection always severs *before* it
 closes the event stream it drives, so a closed stream is proof a cause already
 exists to read back.
+
+A severed transport refuses a dispatch itself: `Transport::dispatch` answers
+the standing cause, and its `Ok` promises the stream the run's `Report`, or
+its close once severed. The check sits in the carrier that sends, so a sever
+racing it still leaves the drain an end (identity's `Report`, a wire's close),
+never a scoped drain polling an identity stream, which never closes, for a
+`Report` that will not come.
 
 The **attach verdict** is the handshake's answer: the engine replies to
 every `Attach` with `Attached` or `Refused(reason)` as a session event, and

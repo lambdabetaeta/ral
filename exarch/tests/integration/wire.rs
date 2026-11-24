@@ -127,12 +127,14 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let id = DispatchId(7);
     transport.control().cancel(id);
     let started = Instant::now();
-    transport.dispatch(
-        id,
-        Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
-        &(Arc::new(()) as Arc<dyn Host>),
-        None,
-    );
+    transport
+        .dispatch(
+            id,
+            Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
+            &(Arc::new(()) as Arc<dyn Host>),
+            None,
+        )
+        .expect("an attached transport accepts the dispatch");
 
     let report = loop {
         let (did, event) = transport.events().recv().expect("the engine must answer");
@@ -173,12 +175,14 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
 
     // Fire-and-forget: write the Dispatch frame and do not drain its Report.
     // A literal id suffices — nothing here correlates a reply.
-    transport.dispatch(
-        DispatchId(1),
-        Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
-        &(Arc::new(()) as Arc<dyn Host>),
-        None,
-    );
+    transport
+        .dispatch(
+            DispatchId(1),
+            Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
+            &(Arc::new(()) as Arc<dyn Host>),
+            None,
+        )
+        .expect("an attached transport accepts the dispatch");
 
     // Give the engine time to actually enter the sleep, so what the dropped
     // peer interrupts is a genuinely in-flight run, not a race with dispatch.

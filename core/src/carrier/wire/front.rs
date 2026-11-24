@@ -410,10 +410,22 @@ impl Transport for WireTransport {
         &self.ends
     }
 
-    fn dispatch(&self, id: DispatchId, run: Run, _host: &Arc<dyn Host>, _within: Option<&Scope>) {
+    fn dispatch(
+        &self,
+        id: DispatchId,
+        run: Run,
+        _host: &Arc<dyn Host>,
+        _within: Option<&Scope>,
+    ) -> Result<(), Severed> {
+        // A severance the reader latched leaves the socket open: a frame
+        // written now could still run, unreported, on a live engine.
+        if let Some(cause) = self.severed() {
+            return Err(cause);
+        }
         // The host is consulted by the drain loop, not here: an enquiry
         // crossing a wire is a frame on `events()`, answered by whoever drains
-        // it — `dispatch_to_report`.
+        // it — `dispatch_to_report`. A failed write severs and closes the
+        // event stream.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Dispatch(id, Box::new(run))) {
             let report = Report::refused(Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
                 ProtocolFailureUnencodable {
@@ -427,6 +439,7 @@ impl Transport for WireTransport {
                 .lock_ignore_poison()
                 .push_back((id, Event::Report(report)));
         }
+        Ok(())
     }
 
     fn probe(&self, probe: &Probe) -> Result<FOValue, ProbeError> {

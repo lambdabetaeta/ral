@@ -300,12 +300,14 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
     );
 
     let id = DispatchId(1);
-    transport.dispatch(
-        id,
-        Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
-        &(Arc::new(()) as Arc<dyn Host>),
-        None,
-    );
+    transport
+        .dispatch(
+            id,
+            Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
+            &(Arc::new(()) as Arc<dyn Host>),
+            None,
+        )
+        .expect("an attached transport accepts the dispatch");
 
     match peer
         .read_frame()

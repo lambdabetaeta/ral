@@ -153,9 +153,15 @@ impl Transport for IdentityTransport {
         &self.ends
     }
 
-    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>, within: Option<&Scope>) {
-        if self.severed().is_some() {
-            return;
+    fn dispatch(
+        &self,
+        id: DispatchId,
+        run: Run,
+        host: &Arc<dyn Host>,
+        within: Option<&Scope>,
+    ) -> Result<(), Severed> {
+        if let Some(cause) = self.severed() {
+            return Err(cause);
         }
         let scope = self.scopes.open(id, within);
         let events = self.event_tx.clone();
@@ -171,6 +177,7 @@ impl Transport for IdentityTransport {
         };
         let report = self.engine.lock().run(id, run, rails, &scope);
         let _ = self.event_tx.send((id, Event::Report(report)));
+        Ok(())
     }
 
     fn probe(&self, probe: &Probe) -> Result<FOValue, ProbeError> {
