@@ -4,7 +4,9 @@
 #![cfg(feature = "coreutils")]
 
 use crate::common::must_succeed;
-use ral_core::{ValClos, View};
+#[cfg(unix)]
+use ral_core::ValClos;
+use ral_core::View;
 
 #[cfg(unix)]
 fn must_fail(input: &str) {

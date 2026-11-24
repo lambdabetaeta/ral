@@ -14,7 +14,9 @@ mod eliminate;
 mod tests;
 
 use crate::fact::{InvalidCause, Multiline};
-use crate::ir::{Comp, Env, VClosRef, ValClos};
+#[cfg(unix)]
+use crate::ir::VClosRef;
+use crate::ir::{Comp, Env, ValClos};
 use crate::shell::evaluator::machine;
 use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Mooring, Settled, Shell, TitlePolicy};
