@@ -947,7 +947,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clipboard"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "arboard",
  "base64 0.23.1",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "exarch"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "atomic_refcell",
  "base64 0.23.1",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "guest-abi"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "h2"
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "netgate"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "guest-abi",
  "http",
@@ -5542,7 +5542,7 @@ dependencies = [
 
 [[package]]
 name = "ral"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "clap",
  "clipboard",
@@ -5564,7 +5564,7 @@ dependencies = [
 
 [[package]]
 name = "ral-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anstyle-query",
  "ariadne",
@@ -5667,7 +5667,7 @@ dependencies = [
 
 [[package]]
 name = "ral-guest"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "guest-abi",
  "libc",
@@ -5676,7 +5676,7 @@ dependencies = [
 
 [[package]]
 name = "ral-lint"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "regex",
 ]
@@ -5698,7 +5698,7 @@ dependencies = [
 
 [[package]]
 name = "ral-vm-image-build-tools"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "guest-abi",
  "ral-core",
@@ -7006,7 +7006,7 @@ dependencies = [
 
 [[package]]
 name = "synod"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "block2",
  "exarch",
@@ -9016,7 +9016,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vm-manager"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "block2",
  "dispatch2",
