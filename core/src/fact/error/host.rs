@@ -405,23 +405,22 @@ label!(PodKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineFactoryFailure {
-    Unsupported(EngineFactoryFailureUnsupported),
     MachineThreadStopped,
     MissingSocketDevice,
     NonVirtioSocketDevice,
     CompletionWithoutResult,
     DialTimedOut(EngineFactoryFailureDialTimedOut),
     DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected),
+    DialUnanswered(EngineFactoryFailureDialUnanswered),
     Platform(EngineFactoryFailurePlatform),
     Io(IoCause),
 }
-variant!(EngineFactoryFailure { Unsupported(EngineFactoryFailureUnsupported): "unsupported", MachineThreadStopped: "machine-thread-stopped", MissingSocketDevice: "missing-socket-device", NonVirtioSocketDevice: "non-virtio-socket-device", CompletionWithoutResult: "completion-without-result", DialTimedOut(EngineFactoryFailureDialTimedOut): "dial-timed-out", DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected): "dial-wait-disconnected", Platform(EngineFactoryFailurePlatform): "platform", Io(IoCause): "io" });
+variant!(EngineFactoryFailure { MachineThreadStopped: "machine-thread-stopped", MissingSocketDevice: "missing-socket-device", NonVirtioSocketDevice: "non-virtio-socket-device", CompletionWithoutResult: "completion-without-result", DialTimedOut(EngineFactoryFailureDialTimedOut): "dial-timed-out", DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected): "dial-wait-disconnected", DialUnanswered(EngineFactoryFailureDialUnanswered): "dial-unanswered", Platform(EngineFactoryFailurePlatform): "platform", Io(IoCause): "io" });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
 pub enum FactoryBackend {
-    Broker,
-    HyperV,
+    OpenVmm,
     Virtualization,
 }
 label!(FactoryBackend);
@@ -1555,12 +1554,6 @@ record!(FrontmatterFailureDirectoryNameMismatch {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineFactoryFailureUnsupported {
-    pub backend: FactoryBackend,
-}
-record!(EngineFactoryFailureUnsupported { backend: "backend" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineFactoryFailureDialTimedOut {
     pub port: u32,
     pub within: DurationFact,
@@ -1575,6 +1568,12 @@ pub struct EngineFactoryFailureDialWaitDisconnected {
     pub port: u32,
 }
 record!(EngineFactoryFailureDialWaitDisconnected { port: "port" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFactoryFailureDialUnanswered {
+    pub port: u32,
+}
+record!(EngineFactoryFailureDialUnanswered { port: "port" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineFactoryFailurePlatform {
@@ -2560,7 +2559,6 @@ impl PodKind {
 impl EngineFactoryFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::Unsupported(value) => value.describe(),
             Self::MachineThreadStopped => {
                 "the machine thread stopped before the guest connection could be obtained".into()
             }
@@ -2571,6 +2569,7 @@ impl EngineFactoryFailure {
             }
             Self::DialTimedOut(value) => value.describe(),
             Self::DialWaitDisconnected(value) => value.describe(),
+            Self::DialUnanswered(value) => value.describe(),
             Self::Platform(value) => value.describe(),
             Self::Io(value) => value.describe(),
         }
@@ -2580,8 +2579,7 @@ impl EngineFactoryFailure {
 impl FactoryBackend {
     pub fn describe(&self) -> String {
         match self {
-            Self::Broker => "broker",
-            Self::HyperV => "Hyper-V",
+            Self::OpenVmm => "OpenVMM",
             Self::Virtualization => "Virtualization.framework",
         }
         .into()
@@ -3936,15 +3934,6 @@ impl FrontmatterFailureDirectoryNameMismatch {
     }
 }
 
-impl EngineFactoryFailureUnsupported {
-    pub fn describe(&self) -> String {
-        format!(
-            "the {} backend does not support connecting to a guest socket",
-            self.backend.describe()
-        )
-    }
-}
-
 impl EngineFactoryFailureDialTimedOut {
     pub fn describe(&self) -> String {
         format!(
@@ -3958,6 +3947,15 @@ impl EngineFactoryFailureDialWaitDisconnected {
     pub fn describe(&self) -> String {
         format!(
             "the guest connection result channel disconnected while waiting for port {}",
+            self.port
+        )
+    }
+}
+
+impl EngineFactoryFailureDialUnanswered {
+    pub fn describe(&self) -> String {
+        format!(
+            "no listener in the guest accepted a connection on port {}",
             self.port
         )
     }

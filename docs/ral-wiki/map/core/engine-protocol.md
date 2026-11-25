@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
-generated_at_date: 2026-11-12
+generated_at_commit: 723d5391e6080f7f299325283f9c0bf84e43e886
+generated_at_date: 2026-11-24
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/marshal.rs, core/src/marshal/, core/src/shell/grant/spawn.rs]
 ---
 
@@ -66,7 +66,7 @@ marshalled parent, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 49): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 50): checked at `Attach`; a mismatch refuses.
   The contract includes `Start`'s `parent` record field and parent-decode facts.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
@@ -195,8 +195,9 @@ The probe vocabulary, typed once for both ends.
 
 - `WireStream` — `UnixStream` on Unix, `TcpStream` on Windows: std's owner of
   a *connected stream socket*, never a statement about address family
-  (`vm-manager` hands back `AF_VSOCK`/`AF_HYPERV` sockets through the same
-  type).
+  (`vm-manager` hands back an `AF_VSOCK` socket on macOS, and on Windows an
+  `AF_UNIX` socket that OpenVMM relays to the guest's vsock, through the
+  same type).
 - `WireChannel` — length-prefixed JSON framing (`io/frame.rs`) over one
   `WireStream`; `pair()` (test-only: a socketpair on Unix, a loopback accept
   on Windows), `from_stream`, `try_clone`.
@@ -254,7 +255,8 @@ The two interpretations of the algebra, and what they share.
   entered by `dispatch_to_report` and checked by every typed reading and the
   identity carrier's `probe`, panicking with a didactic sentence.
 - `dispatch_to_report` — mint a `DispatchId`, aim the control door at it,
-  call `transport.dispatch`, drain `events()` to that dispatch's own `Report`,
+  call `transport.dispatch` (which refuses with the standing `Severed`
+  itself; its `Ok` promises the run's `Report` or the stream's close), drain `events()` to that dispatch's own `Report`,
   forwarding `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
   With `within`, it polls every `POLL_SLICE` and sends an addressed strike
   before dispatch and whenever the observed cause rises.

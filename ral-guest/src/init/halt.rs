@@ -118,7 +118,7 @@ pub(super) fn halt(engines: &Engines, why: &str) -> Result<Infallible, String> {
         let _ = kill_process_group(engine, Signal::KILL);
     }
     kill_cgroup(Path::new(layout::EXEC_CGROUP));
-    // Flush the workspace before its export disappears with the machine.
+    // Flush the workspace before its share disappears with the machine.
     rustix::fs::sync();
     reboot(RebootCommand::PowerOff)
         .map_err(|err| format!("could not power the machine off: {err}"))?;

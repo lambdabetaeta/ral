@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: da9576de
-verified_at_commit: 3dbbe8f3
-verified_at_date: 2026-10-27
+generated_at_commit: 723d5391
+verified_at_commit: 723d5391
+verified_at_date: 2026-11-24
 anchors: [site!, Site, Surface, Silent, spelled_parent]
 ---
 
@@ -139,6 +139,18 @@ were wrong with that.
   > **Amended 2026-10-27.** Synod is binary-only and declares `mod site;`
   > once in `main.rs`; the lib+bin case no longer arises. Broker service sites
   > live in `synod-machine-broker/src/site.rs`; vm-manager keeps host/client sites.
+
+  > **Amended 2026-11-24.** The broker crate and its `site.rs` are gone
+  > ([[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]).
+  > - **Dropped:** vm-manager's `RootfsWrapProbe`, `RootfsWrap` and
+  >   `BrokerPipeConnect`.
+  > - **Reused:** `CheckoutRoot` resolves `openvmm.exe`, and `ConsoleLogOpen`
+  >   opens the openvmm log.
+  > - **Widened:** `SessionDiskFolder` now covers Windows.
+  >
+  > Every banned call in `vm-manager/src/`, the Win32 calls of the OpenVMM
+  > backend included, is a `site!`. There is no raw
+  > `#[allow(clippy::disallowed_methods)]` in production code.
 - **One third-party-codegen exception, pinned.** `tauri::generate_context!()` in
   `synod/src/main.rs` expands to code that exits the process, and prints, when
   building the context panics, and `site!` wraps calls, not macro invocations.

@@ -4,7 +4,6 @@ version = "15.2.0+ral.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Unlicense OR MIT"
-publish = false
 
 [features]
 pcre2 = ["grep/pcre2"]

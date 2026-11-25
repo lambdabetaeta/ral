@@ -1,18 +1,22 @@
 #!/bin/sh
-# Package a ral or exarch binary with its applicable legal files.
+# Package a ral or exarch binary with its applicable legal files, generating
+# its third-party notices for the TARGET and FEATURES it was built with.
+# Needs just and cargo-about 0.9.3.
 set -eu
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: package-release.sh BINARY ARCHIVE.{tar.gz,zip}" >&2
+if [ "$#" -lt 3 ]; then
+    echo "usage: package-release.sh BINARY ARCHIVE.{tar.gz,zip} TARGET [FEATURE...]" >&2
     exit 2
 fi
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 binary=$1
 archive=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")
+target=$3
+shift 3
 name=$(basename -- "$binary")
 case "$name" in
-    ral|ral-*|ral.exe) editor=false ;;
-    exarch|exarch-*|exarch.exe) editor=true ;;
+    ral|ral-*|ral.exe) package=ral notices=THIRDPARTY-RAL ;;
+    exarch|exarch-*|exarch.exe) package=exarch notices=THIRDPARTY-EXARCH ;;
     *) echo "unsupported release binary: $name (expected ral or exarch)" >&2; exit 2 ;;
 esac
 case "$archive" in
@@ -24,9 +28,10 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 cp "$binary" "$stage/$name"
 cp "$repo_root/LICENSE-APACHE" "$repo_root/LICENSE-MIT" "$repo_root/NOTICE" "$stage/"
-if [ "$editor" = true ]; then
+if [ "$package" = exarch ]; then
     cp "$repo_root/vendor/edtui/LICENSE.md" "$stage/LICENSE-EDTUI"
 fi
+just --justfile "$repo_root/justfile" third-party "$package" "$target" "$stage/$notices" "$@"
 case "$archive" in
     *.tar.gz) (cd "$stage" && tar -czf "$archive" *) ;;
     *.zip)

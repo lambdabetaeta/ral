@@ -73,10 +73,11 @@
       <div class="column">
         <p class="eyebrow">How it runs</p>
         <p>Every conversation boots a real virtual machine — Virtualization.framework
-        on macOS, Hyper-V on Windows, where a system service the installer
-        registers creates it. The granted folder is the only part of your
-        computer inside; the machine has no network adapter, and its only route
-        out is a proxy on your own computer that admits an exact list of names.
+        on macOS, OpenVMM on the Windows Hypervisor Platform on Windows, run as
+        an ordinary program under your own account. The granted folder is the
+        only part of your computer inside; the machine has no network adapter,
+        and its only route out is a proxy on your own computer that admits an
+        exact list of names.
         There is no software-only mode: a synod that cannot put hardware between
         the assistant and the rest of your computer refuses to start.</p>
         <p>The folder is recorded before the job and again after it, and the
@@ -99,11 +100,11 @@
         <dl class="facts">
           <div class="fact">
             <dt>Windows</dt>
-            <dd>64-bit x86, with the Virtual Machine Platform feature
-            installed; no particular edition of Windows. The account must be an
-            administrator or a member of the computer's local Hyper-V
-            Administrators group, which is empty by default; synod checks that
-            and names it before a folder is granted.</dd>
+            <dd>64-bit x86, with the Windows Hypervisor Platform feature
+            turned on, and no particular edition of Windows; synod checks the
+            feature and names the remedy before it starts a machine. A standard
+            account is enough: nothing is installed as a service and nothing
+            runs elevated.</dd>
           </div>
           <div class="fact">
             <dt>macOS</dt>

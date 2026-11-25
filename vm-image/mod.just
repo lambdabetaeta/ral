@@ -20,7 +20,7 @@ rootfs:
 boot *flags:
     wsl.exe -- bash -lc 'cd "$(wslpath "{{source_directory()}}")" && bash build-boot.sh {{flags}}'
 
-# Boot the Windows machine layer and hold it open (elevated shell or Hyper-V Administrators).
+# Boot the Windows machine layer and hold it open (needs WHP and a staged openvmm.exe; no elevation).
 [no-cd]
 [windows]
 smoke KERNEL=(source_directory() / 'out/boot/kernel') INITRAMFS=(source_directory() / 'out/boot/initramfs.img') ROOTFS=(source_directory() / 'out/rootfs/rootfs.img') FOLDER=justfile_directory():

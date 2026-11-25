@@ -1,6 +1,16 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/261124_windows-runs-openvmm
 ---
+
+> **Superseded 2026-11-24** by
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. Synod no
+> longer calls HCS. An unprivileged `openvmm.exe` on the Windows Hypervisor
+> Platform boots the machine from raw disks, with no VHD. The folder is shared
+> by virtio-fs over VPCI rather than Plan 9, and the sockets are OpenVMM's
+> hybrid vsock relay over `AF_UNIX` rather than `AF_HYPERV`. Still in force
+> from this page: the premise (an empty machine, not WSL), direct kernel boot,
+> and no network adapter.
 
 # Synod's Windows machine is Hyper-V, created directly through HCS
 

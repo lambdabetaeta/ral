@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build rootfs.img: the synod guest's Ubuntu office userland (README.md), as a
 # raw ext4 image in vm-image/out/rootfs/ (also .zst, .sha256, packages-manifest.txt,
-# verify.txt, build.log). Raw on both arches: the Windows backend wraps it as a
-# fixed VHD at first boot, not here. The guest has no network: this image is the
-# whole package manager.
+# verify.txt, build.log). Raw on both arches: both backends attach these bytes
+# as they are. The guest has no network: this image is the whole package
+# manager.
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"

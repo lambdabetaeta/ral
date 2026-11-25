@@ -14,8 +14,8 @@ use crate::spec::BootArtifact;
 /// Matches vm-image/build-rootfs.sh's --long=27; the default decoder limit is too small.
 pub const ROOTFS_WINDOW: u64 = 1 << 27;
 
-/// Inflate into an unpublished file, optionally verifying its SHA-256.
-pub(crate) fn inflate(archive: &Path, into: &mut File, verify: Option<&str>) -> Result<u64, Error> {
+/// Inflate into an unpublished file, verifying its SHA-256.
+fn inflate(archive: &Path, into: &mut File, expected: &str) -> Result<(), Error> {
     let source = site!(Silent::RootfsInflate, File::open(archive)).map_err(Error::host_file(
         HostFile::GuestImage,
         Act::Open,
@@ -27,8 +27,7 @@ pub(crate) fn inflate(archive: &Path, into: &mut File, verify: Option<&str>) -> 
     )
     .map_err(Error::host_file(HostFile::GuestImage, Act::Read, archive))?;
     let mut sink = std::io::BufWriter::new(into);
-    let mut hasher = verify.map(|_| Sha256::new());
-    let mut bytes = 0u64;
+    let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = decoder.read(&mut buf).map_err(Error::host_file(
@@ -39,30 +38,25 @@ pub(crate) fn inflate(archive: &Path, into: &mut File, verify: Option<&str>) -> 
         if n == 0 {
             break;
         }
-        if let Some(hasher) = &mut hasher {
-            hasher.update(&buf[..n]);
-        }
+        hasher.update(&buf[..n]);
         sink.write_all(&buf[..n]).map_err(Error::host_file(
             HostFile::GuestImage,
             Act::Unpack,
             archive,
         ))?;
-        bytes += u64::try_from(n).unwrap_or(u64::MAX);
     }
     sink.flush()
         .map_err(Error::host_file(HostFile::GuestImage, Act::Unpack, archive))?;
-    if let (Some(expected), Some(hasher)) = (verify, hasher)
-        && hex(&hasher.finalize()) != expected
-    {
+    if hex(&hasher.finalize()) != expected {
         return Err(Error::CorruptGuestImage {
             archive: archive.to_path_buf(),
         });
     }
-    Ok(bytes)
+    Ok(())
 }
 
 /// Publish a complete, synced file once under an identity-derived name.
-pub(crate) fn publish(
+fn publish(
     cache: &Path,
     leaf: &str,
     prepare: impl FnOnce(&mut File) -> Result<(), Error>,
@@ -135,10 +129,7 @@ pub fn locate(exe: &Path) -> Result<Layout, Error> {
             });
         }
     }
-    let checkout = site!(Silent::CheckoutRoot, exe => ancestors())
-        .find(|dir| dir.ends_with("target"))
-        .and_then(|target| site!(Silent::CheckoutRoot, target => parent()));
-    if let Some(checkout) = checkout {
+    if let Some(checkout) = checkout(exe) {
         let out = checkout.join("vm-image").join("out");
         let boot = out.join("boot");
         let rootfs_dir = out.join("rootfs");
@@ -158,6 +149,13 @@ pub fn locate(exe: &Path) -> Result<Layout, Error> {
         }
     }
     Err(Error::NoGuestImage { looked_in })
+}
+
+/// The checkout an executable under its `target` directory was built in.
+pub(crate) fn checkout(exe: &Path) -> Option<&Path> {
+    site!(Silent::CheckoutRoot, exe => ancestors())
+        .find(|dir| dir.ends_with("target"))
+        .and_then(|target| site!(Silent::CheckoutRoot, target => parent()))
 }
 
 fn is_file(path: &Path) -> bool {
@@ -188,7 +186,7 @@ impl Layout {
                     })?
                     .to_ascii_lowercase();
                 publish(cache, &format!("rootfs-{expected}.img"), |stage| {
-                    inflate(&archive, stage, Some(&expected)).map(|_| ())
+                    inflate(&archive, stage, &expected)
                 })?
             }
         };
@@ -198,21 +196,9 @@ impl Layout {
             rootfs,
         })
     }
-
-    /// Preserve the shipped spelling so Windows can inflate directly into a VHD.
-    pub fn found(self) -> BootArtifact {
-        BootArtifact {
-            kernel: self.kernel,
-            initramfs: self.initramfs,
-            rootfs: match self.rootfs {
-                Rootfs::Plain(path) => path,
-                Rootfs::Packed { archive, .. } => archive,
-            },
-        }
-    }
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()
@@ -326,7 +312,6 @@ mod tests {
         assert!(
             matches!(&layout.rootfs, Rootfs::Packed { archive: found, .. } if found == &archive)
         );
-        assert_eq!(layout.found().rootfs, archive);
     }
 
     #[test]
@@ -356,7 +341,7 @@ mod tests {
             .join("target")
             .join("debug")
             .join("deps")
-            .join("broker");
+            .join("synod");
         let layout = locate(&exe).unwrap();
         assert!(matches!(layout.rootfs, Rootfs::Plain(found) if found == rootfs));
     }

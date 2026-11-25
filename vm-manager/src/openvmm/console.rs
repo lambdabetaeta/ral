@@ -1,6 +1,7 @@
-//! The console pipe exists before the machine starts.
+//! The console pipe exists before the machine starts; `OpenVMM` connects to it as a client.
 //! Stdout failure leaves the bounded log and tail running; failed boots retain their logs.
-//! Wake connects and closes to release a pump waiting for a machine that never started.
+//! Dropping the console connects and closes, releasing a pump waiting for a machine that never
+//! started.
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
@@ -14,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use super::win;
 use crate::error::{Act, Error, HostFile};
-use crate::hcs::win;
 use crate::lifecycle::aside_spelling;
 use crate::site::{Silent, site};
 
@@ -23,16 +24,16 @@ use windows_sys::Win32::Foundation::{
     ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
+/// `PolledPipe` refuses an unbuffered pipe.
 const PIPE_BUFFER: u32 = 8 * 1024;
-
-/// The emulated serial port opens read/write, so its pipe must permit both even though we only read.
-const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 
 const RETAINED_LINES: usize = 6;
 
@@ -44,11 +45,33 @@ const LOG_LIMIT: u64 = 256 * 1024;
 /// One day lets a failed boot be diagnosed the next morning without keeping logs indefinitely.
 const LOG_LIFETIME: Duration = Duration::from_hours(24);
 
-/// How a console log is named, so [`sweep`] can recognise its own kind and
-/// leave every other file in the cache — the wrapped rootfs above all — alone.
-const LOG_PREFIX: &str = "synod-console-";
-
 const LOG_SUFFIX: &str = ".log";
+
+/// A machine's two logs: what the guest said, and what `OpenVMM` said about it.
+#[derive(Clone, Copy)]
+pub(super) enum Log {
+    Console,
+    Vmm,
+}
+
+impl Log {
+    const ALL: [Self; 2] = [Self::Console, Self::Vmm];
+
+    /// [`sweep`] recognises only these names and leaves every other file in the cache alone.
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Console => "synod-console-",
+            Self::Vmm => "synod-openvmm-",
+        }
+    }
+
+    const fn file(self) -> HostFile {
+        match self {
+            Self::Console => HostFile::ConsoleLog,
+            Self::Vmm => HostFile::VmmLog,
+        }
+    }
+}
 
 /// Written where a log stops growing, so a reader who finds one ending
 /// mid-boot knows the ending is synod's and not the guest's.
@@ -57,7 +80,7 @@ const TRUNCATED: &str = "[synod: this console log reached its size limit; what t
 
 #[derive(Debug)]
 pub(super) struct Console {
-    name: String,
+    id: String,
     /// An absent log is reported as lost diagnostics rather than naming a nonexistent file.
     log: Option<PathBuf>,
     tail: Arc<Mutex<Tail>>,
@@ -65,36 +88,42 @@ pub(super) struct Console {
 
 impl Console {
     /// # Errors
-    /// Returns the pipe-creation refusal; a missing log or console does not refuse the machine.
+    /// Returns the pipe or pump refusal; a missing log or console does not refuse the machine.
     pub(super) fn create(id: &str, cache: &Path) -> Result<Self, Error> {
-        let name = format!(r"\\.\pipe\synod-console-{id}");
+        let name = pipe_name(id);
+        let refused = |cause: std::io::Error| Error::HostFile {
+            file: HostFile::ConsolePipe,
+            act: Act::Create,
+            path: PathBuf::from(&name),
+            cause: cause.to_string(),
+        };
+        let owner = win::user_sid()
+            .and_then(|sid| win::Descriptor::new(&format!("D:P(A;;FA;;;{sid})")))
+            .map_err(refused)?;
+        let attributes = owner.attributes();
         let wide = win::wide(name.as_ref());
-        // SAFETY: the live NUL-terminated name requests one blocking byte-mode instance with default security.
+        // SAFETY: a live NUL-terminated name and descriptor; one blocking byte-mode instance, which
+        // OpenVMM's serial port opens for both reading and writing.
         let handle = unsafe {
             CreateNamedPipeW(
                 wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 PIPE_BUFFER,
                 PIPE_BUFFER,
                 0,
-                std::ptr::null(),
+                &raw const attributes,
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err(Error::HostFile {
-                file: HostFile::ConsolePipe,
-                act: Act::Create,
-                path: PathBuf::from(name),
-                cause: std::io::Error::last_os_error().to_string(),
-            });
+            return Err(refused(std::io::Error::last_os_error()));
         }
         // SAFETY: a fresh pipe handle this function owns; ownership moves to the
         // `OwnedHandle` the pump thread takes, and is closed exactly once there.
         let server = unsafe { OwnedHandle::from_raw_handle(handle) };
 
-        let (log, file) = match open_log(cache, id) {
+        let (log, file) = match open_log(Log::Console, cache, id) {
             Ok((path, file)) => (Some(path), Some(file)),
             Err(why) => {
                 eprintln!(
@@ -105,12 +134,21 @@ impl Console {
             }
         };
         let tail = Arc::new(Mutex::new(Tail::default()));
-        spawn_pump(server, file, Arc::clone(&tail));
-        Ok(Self { name, log, tail })
+        // A pump that never started has dropped the server, so no pipe is advertised.
+        spawn_pump(server, file, Arc::clone(&tail)).map_err(|cause| {
+            discard(log.as_deref());
+            refused(cause)
+        })?;
+        Ok(Self {
+            id: id.to_owned(),
+            log,
+            tail,
+        })
     }
 
-    pub(super) fn pipe(&self) -> &str {
-        &self.name
+    /// The spelling `OpenVMM` routes to its named-pipe client (`serial_io.rs`).
+    pub(super) fn pipe(&self) -> String {
+        format!("//./pipe/{}{}", Log::Console.prefix(), self.id)
     }
 
     pub(super) fn log(&self) -> Option<&Path> {
@@ -123,17 +161,12 @@ impl Console {
             .unwrap_or_else(PoisonError::into_inner)
             .lines()
     }
+}
 
-    /// Only successful boots discard logs; a failed boot may have named its log for a future reader.
-    pub(super) fn discard(&self) {
-        if let Some(path) = &self.log {
-            let _ = site!(Silent::ConsoleLogDiscard, std::fs::remove_file(path));
-        }
-    }
-
-    /// Connecting and closing wakes a parked pump; a missing server is harmless.
-    pub(super) fn wake(&self) {
-        let wide = win::wide(self.name.as_ref());
+impl Drop for Console {
+    /// Connecting and closing wakes a parked pump; a missing or busy server is harmless.
+    fn drop(&mut self) {
+        let wide = win::wide(pipe_name(&self.id).as_ref());
         // SAFETY: the name is live and NUL-terminated; zero access connects without reading or writing.
         let client = unsafe {
             site!(
@@ -210,18 +243,29 @@ impl Tail {
     }
 }
 
+fn pipe_name(id: &str) -> String {
+    format!(r"\\.\pipe\{}{id}", Log::Console.prefix())
+}
+
+/// Only a clean stop discards a log; a refusal may have named it for a future reader.
+pub(super) fn discard(log: Option<&Path>) {
+    if let Some(path) = log {
+        let _ = site!(Silent::ConsoleLogDiscard, std::fs::remove_file(path));
+    }
+}
+
 /// # Errors
 /// Returns the cache or log creation refusal; the caller continues without a log.
-fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
+pub(super) fn open_log(log: Log, cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
     site!(Silent::ConsoleLogOpen, std::fs::create_dir_all(cache)).map_err(Error::host_file(
         HostFile::MachineCache,
         Act::Make,
         cache,
     ))?;
     sweep(cache);
-    let path = cache.join(format!("{LOG_PREFIX}{id}{LOG_SUFFIX}"));
+    let path = cache.join(format!("{}{id}{LOG_SUFFIX}", log.prefix()));
     let file = site!(Silent::ConsoleLogOpen, File::create(&path)).map_err(Error::host_file(
-        HostFile::ConsoleLog,
+        log.file(),
         Act::Create,
         &path,
     ))?;
@@ -238,7 +282,10 @@ fn sweep(cache: &Path) {
         let Some(name) = site!(Silent::ConsoleLogSweep, &name => to_str()) else {
             continue;
         };
-        if !name.starts_with(LOG_PREFIX) || !name.ends_with(LOG_SUFFIX) {
+        let ours = Log::ALL
+            .iter()
+            .any(|log| name.starts_with(log.prefix()) && name.ends_with(LOG_SUFFIX));
+        if !ours {
             continue;
         }
         let stale = entry
@@ -253,8 +300,12 @@ fn sweep(cache: &Path) {
     }
 }
 
-/// The unjoined pump ends on machine EOF or a wake connection when the machine never started.
-fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
+/// The unjoined pump ends on machine EOF, or on the console's drop when the machine never started.
+fn spawn_pump(
+    server: OwnedHandle,
+    log: Option<File>,
+    tail: Arc<Mutex<Tail>>,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("synod-guest-console".to_string())
         .spawn(move || {
@@ -313,7 +364,7 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
                     .absorb(&String::from_utf8_lossy(chunk));
             }
         })
-        .ok();
+        .map(drop)
 }
 
 /// Keep the log head and mark truncation explicitly; the ring retains the tail.
@@ -345,7 +396,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a cache");
         let a = Console::create("0000-a", dir.path()).expect("a pipe is created");
         let b = Console::create("0000-b", dir.path()).expect("a second pipe is created");
-        assert!(a.pipe().starts_with(r"\\.\pipe\synod-console-"));
+        assert!(a.pipe().starts_with("//./pipe/synod-console-"));
         assert_ne!(a.pipe(), b.pipe());
 
         let log = a.log().expect("a log was opened");
@@ -359,8 +410,6 @@ mod tests {
             Some("synod-console-0000-a.log")
         );
         assert_ne!(a.log(), b.log());
-        a.wake();
-        b.wake();
     }
 
     #[test]
@@ -379,22 +428,22 @@ mod tests {
             ),
             "{err:?}"
         );
-        held.wake();
+        drop(held);
     }
 
     #[test]
-    fn waking_an_absent_pipe_is_harmless() {
+    fn dropping_a_console_without_a_pipe_is_harmless() {
         let console = Console {
-            name: r"\\.\pipe\synod-console-never-existed".to_string(),
+            id: "never-existed".to_string(),
             log: None,
             tail: Arc::new(Mutex::new(Tail::default())),
         };
-        console.wake();
-        console.discard();
+        discard(console.log());
         assert!(
             console.tail().is_empty(),
             "a console nobody wrote to is mute"
         );
+        drop(console);
     }
 
     #[test]
@@ -454,7 +503,7 @@ mod tests {
         machine.flush().expect("the machine's end is still open");
         drop(machine);
 
-        console.discard();
+        discard(console.log());
         assert!(
             !log.exists(),
             "a session that ended cleanly leaves no console log behind"

@@ -3,7 +3,7 @@
 //! the one liveness law both ends of it keep.
 //!
 //! [`WireStream`] is `UnixStream` on Unix and `TcpStream` on Windows, yet
-//! `vm-manager` hands back `AF_VSOCK` and `AF_HYPERV` sockets: the types are
+//! `vm-manager` hands back `AF_VSOCK` and `AF_UNIX` sockets: the types are
 //! borrowed only as std's owner of a *connected stream socket*, every operation
 //! used here being one syscall in any family.  Nothing here or above asks such
 //! a stream for an address — the one question that would expose the pretence.

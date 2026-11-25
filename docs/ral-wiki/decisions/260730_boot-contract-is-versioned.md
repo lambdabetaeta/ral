@@ -165,3 +165,14 @@ guest argv agreement still ship together.
 > `ports::FACTORY`, `layout` or `packet` bump `CONTRACT`; this extraction preserves
 > version 3. Both backends use `vm-manager/src/spec.rs::boot_line` to call the
 > sole command-line writer.
+
+> **Amended 2026-11-24.** See
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. `CONTRACT`
+> is 4. Both platforms now share the folder over virtio-fs, so:
+> - `guest_abi::boot::Export` is deleted, and `Boot.workspace: String` is the
+>   virtiofs tag, validated as before;
+> - `ral.plan9` and `ports::PLAN9` are deleted;
+> - `command_line` writes ` ral.workspace=<tag>`.
+>
+> Packaging refuses media built at contract 3, so both the amd64 and the arm64
+> media must be rebuilt.

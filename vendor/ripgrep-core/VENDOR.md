@@ -26,10 +26,14 @@ rebase is a near-mechanical re-apply:
   replaced by `u8` throughout.
 - `flags/parse.rs`: `parse_from` / `parse_low_from` thread explicit argv.
 - `flags/mod.rs`: re-exports `parse_from`.
-- `Cargo.toml`: renamed to `ral-ripgrep-core`, `publish = false`,
+- `Cargo.toml`: renamed to `ral-ripgrep-core`,
   `[lib] path = "src/lib.rs"`, no `tikv-jemallocator` (it went with the
   allocator), and `[lints.clippy] all = "allow"` so the vendored source stays
   diffable against upstream (the workspace lints are not applied here).
+
+`COPYING`, `LICENSE-MIT` and `UNLICENSE` are upstream's top-level licence
+files at the tag. They, and the absence of `publish = false`, put this crate
+in the THIRDPARTY-* notices; cargo-about treats unpublished crates as ours.
 
 `vendor/rustfmt.toml` turns formatting off beneath `vendor/`, so everything
 else is upstream's bytes and the shim edits are hand-written in its
@@ -39,7 +43,8 @@ else is upstream's bytes and the shim edits are hand-written in its
 
 1. Check out the target ripgrep tag upstream.
 2. Copy every file under `crates/core/` except `main.rs` and `README.md`
-   over `src/` here, wholesale (the data files included).
+   over `src/` here, wholesale (the data files included), and the top-level
+   `COPYING`, `LICENSE-MIT` and `UNLICENSE` beside this file.
 3. Re-apply all three shims (`main.rs` → `lib.rs`, `flags/parse.rs`,
    `flags/mod.rs`) by hand onto upstream's text.
 4. Refresh the dependency pins in `Cargo.toml` to match the new tag's

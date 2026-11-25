@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3a8620e3
+generated_at_commit: 723d5391
 generated_at_date: 2026-11-24
 ---
 
@@ -520,9 +520,11 @@ value of it, so a Windows front-end decoding a Linux guest's report at equal
 `PROTOCOL_VERSION` succeeds exactly as any other value would; only the code
 that *produces* or *acts on* the Unix-only value locally is gated. The
 wire's own stream abstraction is std's generic owner of a connected stream
-socket — one end of a socketpair, a vsock or Hyper-V socket into a guest —
-never a name for one address family, so a new transport is a constructor,
-not a rewrite.
+socket — one end of a socketpair, a vsock into a guest, or on Windows an
+`AF_UNIX` socket that OpenVMM relays to the guest's vsock
+([[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]) — never a
+name for one address family, so a new transport is a constructor, not a
+rewrite.
 
 ## Why not gRPC, JSON-RPC, or Cap'n Proto
 

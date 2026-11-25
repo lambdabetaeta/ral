@@ -17,19 +17,19 @@ pub(crate) enum Silent {
     /// Delete the disk after power-off, retrying held handles; host teardown raises no card.
     #[cfg(any(test, target_os = "macos", windows))]
     SessionDiskRelease,
-    /// Host temp configuration supplies macOS session storage; reading it opens no object.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    /// Host temp configuration supplies session storage; reading it opens no object.
+    #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
     SessionDiskFolder,
     /// Poison refuses the connection without spending the announce; the guest may redial. Guards memory only.
     #[cfg(target_os = "macos")]
     AnnounceLock,
-    /// Windows' own cache location is path-valued; reading it opens no object.
+    /// Windows' own cache location holds the machine logs; reading it opens no object.
     #[cfg(windows)]
     LocalAppDataVar,
     /// Without `LOCALAPPDATA`, use host temp configuration; reading it opens no object.
     #[cfg(windows)]
     LocalAppDataFallback,
-    /// JSON paths are strict Unicode, never approximated; conversion opens no object.
+    /// Paths told to `OpenVMM` or bound as sockets are strict Unicode; conversion opens no object.
     #[cfg(windows)]
     DocumentText,
     /// Measure our session disk for host diagnostics; no shell or model run exists.
@@ -38,6 +38,9 @@ pub(crate) enum Silent {
     /// Reclaim only abandoned session disks; housekeeping precedes any guest.
     #[cfg(any(test, target_os = "macos", windows))]
     SessionDiskSweep,
+    /// Read a session entry's reparse tag without following it, so only our own sockets are removed.
+    #[cfg(windows)]
+    SessionSocketProbe,
     /// Only host stderr asides choose their own spelling; displaying a path opens nothing.
     #[cfg(any(test, target_os = "macos", windows))]
     AsideSpelling,
@@ -56,15 +59,15 @@ pub(crate) enum Silent {
     /// Connect without read/write access solely to wake our pump; no contents are opened.
     #[cfg(windows)]
     ConsolePipeWake,
-    /// The shipped image's metadata for its wrap identity; host setup before any engine.
+    /// `OpenVMM` inherits only the host's `SystemRoot`, `TEMP` and `TMP`; reading opens no object.
     #[cfg(windows)]
-    RootfsWrapProbe,
-    /// The source opened for an unpublished VHD stage, before any engine exists.
+    VmmEnvironment,
+    /// `OpenVMM`'s standard input and output are the null device, which holds nothing.
     #[cfg(windows)]
-    RootfsWrap,
-    /// The client end of the service's own pipe, retried while busy; host-side, before any machine.
+    VmmStdio,
+    /// Quote the end of our own `OpenVMM` log in a refusal; host diagnostics read no other file.
     #[cfg(windows)]
-    BrokerPipeConnect,
+    VmmLogTail,
     /// The executable's installation and checkout layout, which no grant judges.
     CheckoutRoot,
     /// Probes and checksum reads of installed media, before any engine exists.

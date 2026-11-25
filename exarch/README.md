@@ -50,9 +50,11 @@ Expand-Archive exarch-windows.zip -DestinationPath exarch-windows
 
 Unix executables likewise keep their platform names. If installing on `PATH`,
 rename the executable to `exarch` (`exarch.exe` on Windows). Retain `NOTICE`,
-`LICENSE-APACHE`, `LICENSE-MIT`, and `LICENSE-EDTUI` with your installation;
-the archive includes all four. `LICENSE-EDTUI` is the vendored editor's verbatim
-MIT licence, not a replacement for the Apache-only portions described in `NOTICE`.
+`LICENSE-APACHE`, `LICENSE-MIT`, `LICENSE-EDTUI`, and `THIRDPARTY-EXARCH` with
+your installation; the archive includes all five. `LICENSE-EDTUI` is the
+vendored editor's verbatim MIT licence, not a replacement for the Apache-only
+portions described in `NOTICE`; `THIRDPARTY-EXARCH` holds the licences of the
+third-party crates compiled in.
 
 ## Run
 

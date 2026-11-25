@@ -8,12 +8,6 @@
     }
   },
   "bundle": {
-    "targets": ["msi"],
-    "windows": {
-      "wix": {
-        "fragmentPaths": ["wix/broker-service.wxs"],
-        "componentGroupRefs": ["SynodMachineBrokerServiceGroup"]
-      }
-    }
+    "targets": ["msi"]
   }
 }

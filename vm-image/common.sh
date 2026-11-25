@@ -20,7 +20,7 @@ case "$(uname -m)" in
     : "${MIRROR:=https://archive.ubuntu.com/ubuntu}" ;;
   *) echo "error: no synod guest for a $(uname -m) host (SYNOD.md §2): build on an" >&2
      echo "Apple-silicon Mac (arm64, Virtualization.framework) or an x86_64 Linux" >&2
-     echo "box or WSL2 (amd64, Hyper-V)." >&2
+     echo "box or WSL2 (amd64, OpenVMM)." >&2
      exit 1 ;;
 esac
 

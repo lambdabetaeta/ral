@@ -1,6 +1,8 @@
-//! Smoke boots require signed, entitled macOS binaries or Windows VM permission.
+//! Smoke boots require signed, entitled macOS binaries, or the Windows Hypervisor Platform
+//! and a staged `openvmm.exe`.
 //! macOS: `dev/scripts/sign-virtualization.sh target/debug/examples/boot-smoke`
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
+//! Exits nonzero, after the machine is torn down, if any probe failed.
 
 #![allow(
     clippy::disallowed_macros,
@@ -20,7 +22,7 @@ use ral_core::protocol::{Attach, EngineSpec, Program, Ran, Report, Root, Run};
 use ral_core::shell::runtime::TitlePolicy;
 use ral_core::source::SourceOrigin;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
-use vm_manager::{BootArtifact, Booted, Machine, MachineSpec};
+use vm_manager::{BootArtifact, Booted, DialError, Machine, MachineSpec};
 
 #[cfg(unix)]
 type NetStream = std::os::unix::net::UnixStream;
@@ -29,6 +31,12 @@ type NetStream = std::net::TcpStream;
 
 /// Chosen by this example; the guest listener and host dial must agree.
 const PROBE_PORT: u32 = 1732;
+
+/// No guest process listens here, so a dial must be refused.
+const SILENT_PORT: u32 = 1733;
+
+/// The guest listener answers it with `guest-echo:` and itself.
+const GREETING: &str = "hello-from-the-host";
 
 /// The guest registers this tag; spelling it here avoids an exarch dependency.
 const INSTALLER_TAG: &str = "exarch-agent";
@@ -140,7 +148,7 @@ fn main() {
     // session on EOF — nothing needs to be sent on it first.
     let net = NetStream::from(wires.net);
 
-    prove_the_host_can_dial_in(machine.as_ref(), wires.control, workspace);
+    let mut failures = prove_the_host_can_dial_in(machine.as_ref(), wires.control, workspace);
 
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
     println!("ral-guest's own console lines print above as the guest runs.");
@@ -151,25 +159,29 @@ fn main() {
     drop(net);
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly"),
-        Err(err) => {
-            eprintln!("shutdown failed: {}", err.worded(|path| shown(path)));
-            std::process::exit(1);
+        Err(err) => failures.push(format!(
+            "shutdown failed: {}",
+            err.worded(|path| shown(path))
+        )),
+    }
+    if !failures.is_empty() {
+        for failure in &failures {
+            eprintln!("FAILED: {failure}");
         }
+        std::process::exit(1);
     }
 }
 
 /// Dispatch and dial must overlap: dispatch returns only after the listener exits.
+/// Returns every failed probe.
 fn prove_the_host_can_dial_in(
     machine: &dyn Machine,
     control: impl Into<ral_core::protocol::channel::WireStream>,
     workspace: GuestPath,
-) {
+) -> Vec<String> {
     let transport = match WireTransport::adopt(control, Liveness::default()) {
         Ok(transport) => transport,
-        Err(err) => {
-            eprintln!("could not take control of the machine: {err}");
-            return;
-        }
+        Err(err) => return vec![format!("could not take control of the machine: {err}")],
     };
     let scratch = GuestPath::from_static("/tmp");
     // The guest refuses an attach that does not name its scratch variable.
@@ -180,8 +192,7 @@ fn prove_the_host_can_dial_in(
     );
     transport.attach(attach);
     if let Err(severed) = transport.await_attached() {
-        eprintln!("the guest refused to attach: {severed}");
-        return;
+        return vec![format!("the guest refused to attach: {severed}")];
     }
 
     let run = Run {
@@ -205,12 +216,28 @@ fn prove_the_host_can_dial_in(
 
         // The guest's accept window exceeds this delay for Python to bind.
         std::thread::sleep(Duration::from_secs(3));
-        match dial_and_echo(machine) {
-            Ok(echo) => println!("host read back: {echo:?}"),
-            Err(err) => eprintln!("the dial failed: {err}"),
-        }
-
-        match listening.join() {
+        let expected = format!("guest-echo:{GREETING}");
+        let echoed = match dial_and_echo(machine) {
+            Ok(echo) if echo == expected => {
+                println!("host read back: {echo:?}");
+                Ok(())
+            }
+            Ok(echo) => Err(format!("the guest echoed {echo:?}, not {expected:?}")),
+            Err(err) => Err(format!("the dial failed: {err}")),
+        };
+        let silent = match machine.connect_guest(SILENT_PORT) {
+            Ok(_) => Err(format!(
+                "port {SILENT_PORT} accepted a dial, though nothing listens there"
+            )),
+            Err(err) if unanswered(&err) => {
+                println!("port {SILENT_PORT}, where nothing listens, refused: {err}");
+                Ok(())
+            }
+            Err(err) => Err(format!(
+                "port {SILENT_PORT}, where nothing listens, failed otherwise than unanswered: {err}"
+            )),
+        };
+        let listened = match listening.join() {
             Ok(Ok(Report::Ran(Ran { captured, .. }))) => {
                 if let Some(captured) = captured {
                     print!("{}", String::from_utf8_lossy(&captured.stdout.bytes));
@@ -219,20 +246,30 @@ fn prove_the_host_can_dial_in(
                         eprint!("guest stderr: {stderr}");
                     }
                 }
+                Ok(())
             }
             Ok(Ok(Report::Checked { .. })) => {
-                eprintln!("the guest only checked the program; the listener never ran");
+                Err("the guest only checked the program; the listener never ran".to_string())
             }
             Ok(Ok(Report::Static { rendered, .. })) => {
-                eprint!("the guest never ran the listener: {rendered}");
+                Err(format!("the guest never ran the listener: {rendered}"))
             }
-            Ok(Ok(Report::Faulted { rendered, .. })) => {
-                eprint!("the guest faulted running the listener: {rendered}");
-            }
-            Ok(Err(severed)) => eprintln!("{severed}"),
-            Err(_) => eprintln!("the listening thread panicked"),
-        }
-    });
+            Ok(Ok(Report::Faulted { rendered, .. })) => Err(format!(
+                "the guest faulted running the listener: {rendered}"
+            )),
+            Ok(Err(severed)) => Err(severed.to_string()),
+            Err(_) => Err("the listening thread panicked".to_string()),
+        };
+        [echoed, silent, listened]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect()
+    })
+}
+
+/// `OpenVMM`'s relay says exactly that nothing listened; elsewhere any refusal will do.
+fn unanswered(err: &DialError) -> bool {
+    cfg!(not(windows)) || matches!(err, DialError::Unanswered { port: SILENT_PORT })
 }
 
 fn dial_and_echo(machine: &dyn Machine) -> Result<String, String> {
@@ -247,7 +284,7 @@ fn dial_and_echo(machine: &dyn Machine) -> Result<String, String> {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| format!("could not arm a read deadline: {err}"))?;
     stream
-        .write_all(b"hello-from-the-host")
+        .write_all(GREETING.as_bytes())
         .map_err(|err| format!("could not write to the guest: {err}"))?;
     let mut echo = String::new();
     stream

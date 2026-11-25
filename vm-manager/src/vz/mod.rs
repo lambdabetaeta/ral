@@ -22,14 +22,16 @@ use objc2_virtualization::{
 
 use crate::dial::DialError;
 use crate::error::{Error, GuestConsole, Wire};
-use crate::lifecycle::{Leaf, Missed, SessionDisk, await_dials, stop_within, sweep, unix_seconds};
+use crate::lifecycle::{
+    Missed, SESSION_BYTES, SessionDisk, await_dials, stop_within, sweep, unix_seconds,
+};
 use crate::machine::{self, Booted, Hypervisor, Machine, Socket};
 use crate::spec::{BootArtifact, MachineSpec, SIZE};
 
 mod config;
 mod queue;
 
-use config::{Plan, SESSION_IMAGE_BYTES, build_configuration, ns_error, validate};
+use config::{Plan, build_configuration, ns_error, validate};
 use queue::{
     Ready, SocketReadiness, dial, force_stop, new_listener, on_queue, read_state, request_stop,
 };
@@ -87,9 +89,7 @@ impl Hypervisor for Vz {
     /// Returns the spec, session-disk, configuration or guest-boot refusal.
     fn boot(&self, spec: &MachineSpec) -> Result<Booted, Error> {
         let folder = spec.resolve()?;
-        let session = SessionDisk::create(&self.session_dir, Leaf::Raw, |disk| {
-            disk.set_len(SESSION_IMAGE_BYTES)
-        })?;
+        let session = SessionDisk::create(&self.session_dir, |disk| disk.set_len(SESSION_BYTES))?;
 
         let plan = Plan {
             kernel: self.artifact.kernel.clone(),
@@ -266,11 +266,7 @@ fn boot_machine(
                     },
                     Ok(Ready::Started(Ok(()))) => {}
                     Ok(Ready::Started(Err(error))) => return Err(Missed::Failed(error)),
-                    Err(RecvTimeoutError::Timeout) => {
-                        return Err(Missed::Timeout(
-                            "the kernel may have panicked before its init could run".into(),
-                        ));
-                    }
+                    Err(RecvTimeoutError::Timeout) => return Err(Missed::Timeout),
                     Err(RecvTimeoutError::Disconnected) => {
                         return Err(Missed::Failed(Error::backend(
                             HYPERVISOR,
@@ -281,6 +277,7 @@ fn boot_machine(
             }
         },
         || Some(GuestConsole::Unkept),
+        None,
     )
 }
 
@@ -314,7 +311,10 @@ fn stop_gracefully(queue: &DispatchQueue, machine: &VZVirtualMachine) -> Result<
             )),
             _ => Ok(false),
         },
-        || force_stop(queue, machine),
+        || {
+            force_stop(queue, machine);
+            Ok(())
+        },
     )
 }
 

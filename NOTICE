@@ -32,3 +32,20 @@ This project includes code derived from Ratatui
 (https://github.com/ratatui/ratatui), licensed under the MIT license.
 Copyright (c) 2016-2022 Florian Dehau
 Copyright (c) 2023-2025 The Ratatui Developers
+
+OpenVMM
+Copyright (c) Microsoft Corporation.
+
+Synod's Windows installer includes openvmm.exe, built without modification from
+OpenVMM (https://github.com/microsoft/openvmm), upstream commit
+efe0b08df805fb567cc4023359ef8e94c773837e, licensed under the MIT License.
+The licence text is installed beside it as licenses/LICENSE-OPENVMM, and the
+notices of the third-party code it contains as licenses/THIRDPARTY-OPENVMM.
+
+Third-party crates
+
+Every binary ships with a THIRDPARTY-* file generated from its dependency
+graph: THIRDPARTY-RAL, THIRDPARTY-EXARCH and THIRDPARTY-SYNOD beside ral,
+exarch and synod, and THIRDPARTY-RAL-GUEST and THIRDPARTY-EXARCH in synod's
+guest image. Each reproduces the licences of the third-party crates compiled
+into that binary.

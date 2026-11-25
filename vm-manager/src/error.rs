@@ -1,20 +1,21 @@
-//! Refusals and console reports cross the broker pipe as data.
 //! Paths remain lossless `PathBuf`s until the caller supplies spelling to `Error::worded`.
 //! Platform causes are text; their paths are carried separately.
 
-use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+/// Windows reads `TMP` first, and only a folder of the user's own keeps the session private.
+pub(crate) const MOVE_TEMP: &str = "Point both the TMP and TEMP environment variables (Windows \
+                                    reads TMP first) at a short folder on an NTFS drive that is \
+                                    yours alone, such as a new folder directly in your user \
+                                    profile, and start synod again";
 
 const UNKEPT: &str = "This backend sends the guest's console to the owning process's standard output \
                       and keeps no copy";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum GuestConsole {
     Kept {
-        #[serde(with = "crate::os_path::option")]
         log: Option<PathBuf>,
         tail: Vec<String>,
     },
@@ -37,13 +38,7 @@ impl GuestConsole {
             }
             Self::Kept { log, tail } => {
                 if let Some(path) = log {
-                    let _ = write!(
-                        out,
-                        "The guest's whole console is at {}. It belongs to whichever process ran the \
-                         machine, which under the machine broker is a LocalSystem service, so \
-                         reading it may take an administrator.\n\n",
-                        spell(path)
-                    );
+                    let _ = write!(out, "The guest's whole console is at {}.\n\n", spell(path));
                 } else {
                     out.push_str("The guest's console could not be kept on disk.\n\n");
                 }
@@ -68,112 +63,109 @@ impl GuestConsole {
     }
 }
 
-/// Path spelling belongs to the front-end, including on the broker's far side.
+/// Path spelling belongs to the front-end.
 pub type Spelling = fn(&Path) -> String;
 
-/// Paths cross the pipe in platform-native units and are worded only by the caller.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Paths are kept in platform-native units and are worded only by the caller.
+#[derive(Debug, Clone)]
 pub enum Error {
     NoBackend,
     Unentitled,
-    NotPermitted,
-    NoSuchFolder(#[serde(with = "crate::os_path")] PathBuf),
-    NotAFolder(#[serde(with = "crate::os_path")] PathBuf),
+    /// Windows' hypervisor API is missing or reports no hypervisor.
+    HypervisorPlatformOff,
+    NoSuchFolder(PathBuf),
+    NotAFolder(PathBuf),
     FolderUnreadable {
-        #[serde(with = "crate::os_path")]
         path: PathBuf,
         cause: String,
     },
     MissingBootFile {
-        #[serde(with = "crate::os_path")]
         path: PathBuf,
         cause: String,
     },
-    ServiceUnlocated {
-        cause: String,
-    },
     NoGuestImage {
-        #[serde(with = "crate::os_path::list")]
+        looked_in: Vec<PathBuf>,
+    },
+    /// Every place `openvmm.exe` was looked for.
+    NoVmm {
         looked_in: Vec<PathBuf>,
     },
     CorruptGuestImage {
-        #[serde(with = "crate::os_path")]
         archive: PathBuf,
     },
     HostFile {
         file: HostFile,
         act: Act,
-        #[serde(with = "crate::os_path")]
         path: PathBuf,
         cause: String,
     },
-    /// The service checks the caller's read rights, plus write rights unless `read_only`.
-    FolderForbidden {
-        #[serde(with = "crate::os_path")]
-        path: PathBuf,
-        read_only: bool,
-        cause: String,
-    },
-    FolderUnexamined {
-        #[serde(with = "crate::os_path")]
-        path: PathBuf,
-        cause: String,
-    },
-    /// The granted folder is a junction or a symbolic link, which the machine
-    /// service does not follow.
-    FolderIsLink(#[serde(with = "crate::os_path")] PathBuf),
-    /// The granted folder was changed into a link while its machine was
-    /// starting, so the machine was stopped.
-    FolderChanged(#[serde(with = "crate::os_path")] PathBuf),
     /// Lossy spelling could name another file, so non-Unicode hypervisor paths are refused.
-    NotUnicode(#[serde(with = "crate::os_path")] PathBuf),
+    NotUnicode(PathBuf),
+    /// Without its `\\?\` head, Win32 would read this path as another.
+    NoPlainSpelling(PathBuf),
+    /// As `NoPlainSpelling`, for the temporary folder, whose remedy is to move it.
+    TempNoPlainSpelling(PathBuf),
     /// macOS requires file URLs; empty paths and embedded NULs are refused.
-    NotAFileUrl(#[serde(with = "crate::os_path")] PathBuf),
-    /// Must remain legible across protocol skew; its shape never changes.
-    VersionSkew {
-        client: u32,
-        service: u32,
+    NotAFileUrl(PathBuf),
+    /// Windows' `AF_UNIX` names a socket in at most 107 bytes.
+    SocketPathTooLong {
+        path: PathBuf,
     },
     /// The hypervisor's complaint names no file, so the supplied files travel beside it.
     NotConstructed {
-        hypervisor: Cow<'static, str>,
+        hypervisor: &'static str,
         why: String,
         files: Box<MachineFiles>,
     },
     /// `None` means no console could be opened; an empty retained console is distinct.
     Undialled {
-        hypervisor: Cow<'static, str>,
+        hypervisor: &'static str,
         wire: Wire,
         within_secs: u64,
-        cause: String,
         console: Option<GuestConsole>,
+        /// The hypervisor's own log, where it keeps one.
+        hypervisor_log: Option<PathBuf>,
+    },
+    /// The guest ended its machine before it dialled `wire`.
+    EndedBeforeDial {
+        hypervisor: &'static str,
+        wire: Wire,
+        how: PowerEvent,
+        console: Option<GuestConsole>,
+        hypervisor_log: Option<PathBuf>,
     },
     ForcedStop {
-        hypervisor: Cow<'static, str>,
+        hypervisor: &'static str,
         grace_secs: u64,
     },
     /// Platform causes carry no paths; those belong in the error's data.
     Backend {
-        hypervisor: Cow<'static, str>,
+        hypervisor: &'static str,
         why: String,
+    },
+    /// `OpenVMM` failed in itself; `None` means its log could not be kept.
+    VmmFailed {
+        why: String,
+        log: Option<PathBuf>,
+        tail: Vec<String>,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostFile {
     GuestImage,
     /// The checksum describes the inflated image, not its archive.
     ImageChecksum,
     ImageCache,
-    WrappedImage,
     SessionDirectory,
     SessionDisk,
     DiskImage,
-    /// Includes kernel, initramfs, rootfs and session disk.
-    MachineFile,
     MachineCache,
     ConsolePipe,
     ConsoleLog,
+    Vmm,
+    VmmLog,
+    Socket,
 }
 
 impl HostFile {
@@ -182,31 +174,31 @@ impl HostFile {
             Self::GuestImage => "the guest image",
             Self::ImageChecksum => "the guest image checksum",
             Self::ImageCache => "the guest image cache",
-            Self::WrappedImage => "the wrapped guest image",
             Self::SessionDirectory => "the session directory",
             Self::SessionDisk => "the session disk",
             Self::DiskImage => "the disk image",
-            Self::MachineFile => "the machine's file",
             Self::MachineCache => "the machine cache",
             Self::ConsolePipe => "the console pipe",
             Self::ConsoleLog => "the console log",
+            Self::Vmm => "OpenVMM's program",
+            Self::VmmLog => "OpenVMM's log",
+            Self::Socket => "the socket",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
     Open,
     Read,
     Unpack,
     Write,
     Flush,
-    Size,
     Create,
     Make,
     Place,
-    /// Given to the machine's own account, which opens it as itself.
-    Grant,
+    Start,
+    Bind,
 }
 
 impl Act {
@@ -217,31 +209,47 @@ impl Act {
             Self::Unpack => "unpacked",
             Self::Write => "written",
             Self::Flush => "flushed",
-            Self::Size => "sized",
             Self::Create => "created",
             Self::Make => "made",
             Self::Place => "moved into place",
-            Self::Grant => "opened to the machine",
+            Self::Start => "started",
+            Self::Bind => "bound",
         }
     }
 }
 
 /// The hypervisor opens these files in its own process; any may cause an unattributed path refusal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MachineFiles {
-    #[serde(with = "crate::os_path")]
     pub kernel: PathBuf,
-    #[serde(with = "crate::os_path")]
     pub initramfs: PathBuf,
-    #[serde(with = "crate::os_path")]
     pub rootfs: PathBuf,
-    #[serde(with = "crate::os_path")]
     pub session: PathBuf,
-    #[serde(with = "crate::os_path")]
     pub folder: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How the guest itself ended its machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerEvent {
+    PowerOff,
+    Reset,
+    TripleFault,
+    Watchdog,
+}
+
+impl PowerEvent {
+    /// A clause whose subject is the guest.
+    pub(crate) const fn clause(self) -> &'static str {
+        match self {
+            Self::PowerOff => "the guest powered itself off",
+            Self::Reset => "the guest reset itself",
+            Self::TripleFault => "the guest triple-faulted",
+            Self::Watchdog => "the guest's watchdog fired",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wire {
     Control,
     Net,
@@ -254,12 +262,20 @@ impl Wire {
             Self::Net => "the net wire",
         }
     }
+
+    /// What a guest that never dialled this wire was last seen doing.
+    const fn stall(self) -> &'static str {
+        match self {
+            Self::Control => "the kernel may have panicked before its init could run",
+            Self::Net => "its init ran, since it dialled the control plane, but went no further",
+        }
+    }
 }
 
 impl Error {
     pub fn backend(hypervisor: &'static str, why: impl Into<String>) -> Self {
         Self::Backend {
-            hypervisor: hypervisor.into(),
+            hypervisor,
             why: why.into(),
         }
     }
@@ -297,18 +313,17 @@ impl fmt::Display for Worded<'_> {
         match self.error {
             Error::NoBackend => f.write_str(
                 "this computer cannot run synod's virtual machine: it starts on an Apple Silicon \
-                 Mac, or on Windows with the Virtual Machine Platform",
+                 Mac, or on Windows with the Windows Hypervisor Platform",
             ),
             Error::Unentitled => f.write_str(
                 "this copy of synod is not signed with the entitlement it needs to start a virtual \
                  machine; ask whoever installed synod for a properly signed build",
             ),
-            Error::NotPermitted => f.write_str(
-                "synod is not allowed to create virtual machines on this computer; ask whoever \
-                 administers this computer to add this account to the computer's 'Hyper-V \
-                 Administrators' group, or to install synod with its own installer, which \
-                 registers a service that holds that one privilege so the application does not \
-                 have to",
+            Error::HypervisorPlatformOff => f.write_str(
+                "synod's virtual machine needs the Windows Hypervisor Platform, and it is not \
+                 turned on here. Turn it on under 'Turn Windows features on or off' → 'Windows \
+                 Hypervisor Platform', or run `Enable-WindowsOptionalFeature -Online -FeatureName \
+                 HypervisorPlatform` in an administrator PowerShell; then restart the computer",
             ),
             Error::NoSuchFolder(path) => write!(
                 f,
@@ -331,20 +346,18 @@ impl fmt::Display for Worded<'_> {
                  Ask whoever installed synod to reinstall it.",
                 spell(path)
             ),
-            Error::ServiceUnlocated { cause } => write!(
-                f,
-                "synod's machine service could not tell where it is installed, and so where its \
-                 guest image is: {cause}"
-            ),
             Error::NoGuestImage { looked_in } => write!(
                 f,
                 "no guest image in {}; an installation puts it there; a checkout builds it \
                  with `just vm::boot` and `just vm::rootfs`.",
-                looked_in
-                    .iter()
-                    .map(|path| spell(path))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                listed(looked_in, spell)
+            ),
+            Error::NoVmm { looked_in } => write!(
+                f,
+                "OpenVMM, which runs synod's virtual machine, is not at {}; an installation puts \
+                 openvmm.exe beside synod.exe; a checkout builds it with \
+                 `scripts/build-openvmm.ps1`.",
+                listed(looked_in, spell)
             ),
             Error::CorruptGuestImage { archive } => write!(
                 f,
@@ -363,42 +376,6 @@ impl fmt::Display for Worded<'_> {
                 spell(path),
                 act.participle()
             ),
-            Error::FolderForbidden {
-                path,
-                read_only: true,
-                cause,
-            } => write!(
-                f,
-                "the folder {} cannot be opened by the account that asked for it: {cause}",
-                spell(path)
-            ),
-            Error::FolderForbidden {
-                path,
-                read_only: false,
-                cause,
-            } => write!(
-                f,
-                "the folder {} cannot be opened for changes by the account that asked for it, so \
-                 it cannot be granted with changes allowed: {cause}",
-                spell(path)
-            ),
-            Error::FolderUnexamined { path, cause } => write!(
-                f,
-                "synod's machine service could not examine the folder {}: {cause}",
-                spell(path)
-            ),
-            Error::FolderIsLink(path) => write!(
-                f,
-                "{} is a link to another folder (a junction or a symbolic link), and synod's \
-                 machine service grants only a real folder: grant the folder it points to instead",
-                spell(path)
-            ),
-            Error::FolderChanged(path) => write!(
-                f,
-                "the folder {} was changed into a link to somewhere else while its machine was \
-                 starting, so the machine was stopped",
-                spell(path)
-            ),
             Error::NotUnicode(path) => write!(
                 f,
                 "{} cannot be handed to the virtual machine: its name holds characters that are \
@@ -412,11 +389,27 @@ impl fmt::Display for Worded<'_> {
                  NUL character, so it has no file URL, and the machine is told every file as one",
                 spell(path)
             ),
-            Error::VersionSkew { client, service } => write!(
+            Error::NoPlainSpelling(path) => write!(
                 f,
-                "synod and its machine service are different versions (synod speaks {client}, the \
-                 service speaks {service}); ask whoever administers this computer to install \
-                 them together"
+                "{} cannot be handed to the virtual machine: OpenVMM is told every path in \
+                 Windows' ordinary spelling, and in that spelling Windows reads this one as a \
+                 different path (a name ending in a dot or a space, or a device name such as CON \
+                 or NUL, is read differently). Renaming it, or whichever folder above it has such \
+                 a name, lets synod use it",
+                spell(path)
+            ),
+            Error::TempNoPlainSpelling(path) => write!(
+                f,
+                "the temporary folder {} cannot hold the virtual machine's session: OpenVMM is \
+                 told every path in Windows' ordinary spelling, and in that spelling Windows \
+                 reads this one as a different path. {MOVE_TEMP}",
+                spell(path)
+            ),
+            Error::SocketPathTooLong { path } => write!(
+                f,
+                "the socket {} has a path longer than the 107 bytes Windows allows a local \
+                 socket, because the temporary folder's own path is long. {MOVE_TEMP}",
+                spell(path)
             ),
             Error::NotConstructed {
                 hypervisor,
@@ -436,16 +429,34 @@ impl fmt::Display for Worded<'_> {
                 hypervisor,
                 wire,
                 within_secs,
-                cause,
                 console,
+                hypervisor_log,
             } => {
                 write!(
                     f,
                     "the guest did not dial {} within {within_secs}s of {hypervisor} starting it: \
-                     {cause}. ",
+                     {}. ",
+                    wire.noun(),
+                    wire.stall()
+                )?;
+                console_says(f, console.as_ref(), spell)?;
+                log_named(f, hypervisor, hypervisor_log.as_deref(), spell)
+            }
+            Error::EndedBeforeDial {
+                hypervisor,
+                wire,
+                how,
+                console,
+                hypervisor_log,
+            } => {
+                write!(
+                    f,
+                    "{} before {} was dialled, and {hypervisor} ended the machine. ",
+                    how.clause(),
                     wire.noun()
                 )?;
-                console_says(f, console.as_ref(), spell)
+                console_says(f, console.as_ref(), spell)?;
+                log_named(f, hypervisor, hypervisor_log.as_deref(), spell)
             }
             Error::ForcedStop {
                 hypervisor,
@@ -457,8 +468,29 @@ impl fmt::Display for Worded<'_> {
                  missing"
             ),
             Error::Backend { hypervisor, why } => write!(f, "{hypervisor}: {why}"),
+            Error::VmmFailed { why, log, tail } => {
+                write!(f, "OpenVMM {why}. ")?;
+                match (log, tail.as_slice()) {
+                    (None, _) => f.write_str("Its own log could not be kept"),
+                    (Some(log), []) => write!(f, "Its own log, {}, is empty", spell(log)),
+                    (Some(log), tail) => write!(
+                        f,
+                        "Its own log is {}, which ends {}",
+                        spell(log),
+                        quoted(tail)
+                    ),
+                }
+            }
         }
     }
+}
+
+fn listed(paths: &[PathBuf], spell: Spelling) -> String {
+    paths
+        .iter()
+        .map(|path| spell(path))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A silent retained console, an unkept copy and an unopened console are distinct findings.
@@ -491,6 +523,17 @@ fn console_says(
     }
 }
 
+fn log_named(
+    f: &mut fmt::Formatter<'_>,
+    hypervisor: &str,
+    log: Option<&Path>,
+    spell: Spelling,
+) -> fmt::Result {
+    log.map_or(Ok(()), |log| {
+        write!(f, ". {hypervisor}'s own log is at {}", spell(log))
+    })
+}
+
 fn quoted(lines: &[String]) -> String {
     lines
         .iter()
@@ -515,13 +558,13 @@ mod tests {
     #[test]
     fn every_path_is_spelled_by_the_front_end() {
         let error = Error::NotConstructed {
-            hypervisor: "Hyper-V".into(),
+            hypervisor: "OpenVMM",
             why: "the system cannot find the path specified".to_string(),
             files: Box::new(MachineFiles {
                 kernel: PathBuf::from("kernel"),
                 initramfs: PathBuf::from("initramfs.img"),
-                rootfs: PathBuf::from("rootfs.vhd"),
-                session: PathBuf::from("session.vhd"),
+                rootfs: PathBuf::from("rootfs.img"),
+                session: PathBuf::from("session.img"),
                 folder: PathBuf::from("Invoices"),
             }),
         };
@@ -529,76 +572,11 @@ mod tests {
         for name in [
             "<kernel>",
             "<initramfs.img>",
-            "<rootfs.vhd>",
-            "<session.vhd>",
+            "<rootfs.img>",
+            "<session.img>",
             "<Invoices>",
         ] {
             assert!(text.contains(name), "{name} in: {text}");
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_path_that_is_not_unicode_crosses_a_pipe() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let folder = PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/r\xe9sum\xe9s"));
-        let log = PathBuf::from(std::ffi::OsStr::from_bytes(b"/var/log/\xff.log"));
-        assert!(folder.to_str().is_none() && log.to_str().is_none());
-
-        let wire = serde_json::to_string(&Error::NoSuchFolder(folder.clone())).unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(back, Error::NoSuchFolder(path) if path == folder));
-
-        let looked_in = vec![folder, log.clone()];
-        let wire = serde_json::to_string(&Error::NoGuestImage {
-            looked_in: looked_in.clone(),
-        })
-        .unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(back, Error::NoGuestImage { looked_in: paths } if paths == looked_in));
-
-        let undialled = Error::Undialled {
-            hypervisor: "Hyper-V".into(),
-            wire: Wire::Net,
-            within_secs: 60,
-            cause: "timed out".to_string(),
-            console: Some(GuestConsole::Kept {
-                log: Some(log.clone()),
-                tail: Vec::new(),
-            }),
-        };
-        let wire = serde_json::to_string(&undialled).unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(
-            back,
-            Error::Undialled { console: Some(GuestConsole::Kept { log: Some(path), .. }), .. }
-                if path == log
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_path_that_is_not_unicode_crosses_a_pipe() {
-        use std::os::windows::ffi::OsStringExt;
-
-        let folder = PathBuf::from(std::ffi::OsString::from_wide(&[
-            u16::from(b'C'),
-            u16::from(b':'),
-            u16::from(b'\\'),
-            0xD800,
-        ]));
-        assert!(folder.to_str().is_none());
-
-        let wire = serde_json::to_string(&Error::FolderIsLink(folder.clone())).unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(back, Error::FolderIsLink(path) if path == folder));
-
-        let wire = serde_json::to_string(&Error::NoGuestImage {
-            looked_in: vec![folder.clone()],
-        })
-        .unwrap();
-        let back: Error = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(back, Error::NoGuestImage { looked_in } if looked_in == [folder]));
     }
 }

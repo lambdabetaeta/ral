@@ -80,8 +80,9 @@ tar -xzf ral-linux-x86_64.tar.gz
 ```
 
 The executable keeps the archive's platform name (including `-allutils` for
-with-utils builds). Keep `NOTICE`, `LICENSE-APACHE`, and `LICENSE-MIT` with it;
-if installing the executable elsewhere as `ral`, retain those files too.
+with-utils builds). Keep `NOTICE`, `LICENSE-APACHE`, `LICENSE-MIT`, and
+`THIRDPARTY-RAL` with it; if installing the executable elsewhere as `ral`,
+retain those files too.
 
 On Windows, run `ral-windows.msi` from the same release; the installer retains
 these legal files. From source: `cargo install --path ral`.
@@ -120,5 +121,6 @@ and `` `set v `` overrides it. See
 ## License
 
 Original workspace code is MIT OR Apache-2.0. Codex-derived portions are
-Apache-2.0-only; see [NOTICE](NOTICE). Bundled MIT-licensed dependencies retain
-their own terms. Funded by the Advanced Research + Invention Agency (ARIA).
+Apache-2.0-only; see [NOTICE](NOTICE). Third-party dependencies retain their
+own terms, reproduced in the `THIRDPARTY-*` file shipped beside each binary.
+Funded by the Advanced Research + Invention Agency (ARIA).

@@ -16,6 +16,8 @@ cargo +stable install --force --locked --path "$repo_root/exarch"
 let cargo_home = try { return !{env}[CARGO_HOME] } { |_| return "~/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"
 
+# The notices need just and cargo-about 0.9.3.
+let host = rustc --print host-tuple
 for ['ral', 'exarch'] { |package|
     let legal_dir = "$cargo_home/share/$package"
     mkdir -p $legal_dir
@@ -23,6 +25,7 @@ for ['ral', 'exarch'] { |package|
     if $[$package == 'exarch'] {
         cp "$repo_root/vendor/edtui/LICENSE.md" "$legal_dir/LICENSE-EDTUI"
     }
+    just --justfile "$repo_root/justfile" third-party $package $host "$legal_dir/THIRDPARTY-!{upper $package}"
 }
 
 # ral-sh is a name, not a binary: the POSIX bridge lives in ral and keys on

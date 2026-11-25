@@ -1,8 +1,8 @@
 ---
 status: active
-verified_at_commit: 3dbbe8f3
-verified_at_date: 2026-10-27
-anchors: [guest_abi, ral-guest, netgate, synod-machine-broker]
+verified_at_commit: 723d5391
+verified_at_date: 2026-11-24
+anchors: [guest_abi, ral-guest, netgate, OpenVmm]
 ---
 
 # The VM crates are layered
@@ -10,6 +10,13 @@ anchors: [guest_abi, ral-guest, netgate, synod-machine-broker]
 **One ABI leaf every party links (core and synod included); one guest
 program with no exec and no argv; the gate owns the ledger and the agent reads one
 bit; the privileged service is its own crate.** This decision supersedes nothing.
+
+> **Amended 2026-11-24.** See
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. There is no
+> privileged service: the `synod-machine-broker` crate, its row in the table
+> below and its `tempfile` dev-edge are gone. `vm-manager` owns every machine,
+> and on Windows it spawns `openvmm.exe` itself. `vm-manager` dropped `serde`
+> and `serde_json` and gained no crate. The other rows stand.
 
 ## Why
 
@@ -76,9 +83,8 @@ The removed edges are `guest-net → exarch` and the dependencies on
   ledger API; `stack.rs` owns `Config`, `pipe.rs` owns `Wake`, and private
   `refusal.rs` supplies both decoder and vetter. Device access requires
   `test-util`; `ledger.rs` owns records, and core owns egress policy data.
-- `synod-machine-broker/src/service.rs`: the privileged service owns each
-  connection's machine and pinned folder; `scm.rs` runs its Windows entry points.
-  `vm-manager/src/broker/{wire,client}.rs` supply the public protocol and client.
+- `vm-manager/src/openvmm/`: `OpenVmm`, the Windows backend, spawns and
+  owns one unprivileged `openvmm.exe` per machine.
 - `synod/src/main.rs`: binary-only composition of `folder`, `wire`,
   `assistant`, `seam` and the desktop-gated `window`. `wire.rs` owns all TS
   types; `assistant/guest.rs` owns the guest seam; `seam/narration.rs` folds

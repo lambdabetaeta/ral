@@ -231,8 +231,8 @@ impl WireTransport {
     /// Drive the protocol over an existing duplex `stream`.
     ///
     /// `stream` is the virtual-socket connection to the engine in the guest —
-    /// an `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
-    /// socket under Hyper-V — adopted through [`WireStream`],
+    /// an `AF_VSOCK` descriptor under Virtualization.framework, an `AF_UNIX`
+    /// socket under `OpenVMM` — adopted through [`WireStream`],
     /// whose docs say why std's stream types can carry either. Such a stream
     /// can fall silent without ever tearing, so the first
     /// [`WireTransport::attach`] spawns a heartbeat ticker under `liveness`.

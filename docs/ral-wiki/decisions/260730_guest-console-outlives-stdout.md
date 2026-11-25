@@ -42,6 +42,27 @@ status: active
 > The broker carries `Reply::Console(GuestConsole)`; its wire contract is
 > recorded in [[decisions/260725_windows-machine-broker|windows-machine-broker]].
 
+> **Amended 2026-11-24.** See
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. No service
+> owns the machine now. Synod spawns `openvmm.exe` under the user's own token,
+> so the console log is the user's own, in `%LOCALAPPDATA%\Synod\Machine`.
+> There is no `%ProgramData%` cache, `--console` mode, `broker::VERSION`,
+> `Reply::Console` or `os_path.rs`, and `GuestConsole::report` names no
+> broker. The tee, the bounds and the head-first log stand. The `dialled`
+> bool does not, on Windows: the machine exists only once both wires are
+> dialled, so a failed boot keeps its logs by construction, and only a clean
+> stop discards them, since a refused stop names the openvmm log too.
+> - **The pipe:** Synod still creates it before the machine, but OpenVMM is
+>   now the pipe's client and opens it inside `CreateVM`. The pipe gains an
+>   owner-only DACL and `PIPE_REJECT_REMOTE_CLIENTS`.
+> - **The openvmm log:** OpenVMM's stderr goes to `synod-openvmm-<id>.log`
+>   beside the console log. It is kept and discarded with the console log and
+>   swept by the same sweep. A VMM that dies before it is ready is refused
+>   with its exit code and that log's tail.
+> - **Boot refusals:** a boot that never dials is `Undialled`, and a guest
+>   power event before the wires are dialled is `EndedBeforeDial`. Both carry
+>   the console and now also the hypervisor's own log.
+
 **A diagnostic written to a handle that goes nowhere is not a diagnostic, so the
 guest's console pump tees — `stdout`, a bounded per-machine log in the backend's
 own cache, and a short ring of the last lines in memory — and the boot timeout
@@ -140,8 +161,8 @@ and its COM-port console),
 [[design/failure|failure]] (a refusal is data, and must reach a reader),
 [[map/synod|synod]] (where the console and the backend live).
 
-Cite: `vm-manager/src/hcs/console.rs` (`Console::create`, `Tail`, `open_log`,
-`sweep`, `keep_logging`), `vm-manager/src/hcs/mod.rs` (`Guest::dialled`), `vm-manager/src/error.rs` (`Error::Undialled`, `console_says`, `quoted`),
-`vm-manager/src/error.rs` (`GuestConsole::report`),
-`vm-manager/src/broker/wire.rs` (`VERSION`),
-`vm-manager/src/os_path.rs`.
+Cite: `vm-manager/src/openvmm/console.rs` (`Console::create`, `Tail`, `open_log`,
+`sweep`, `keep_logging`), `vm-manager/src/error.rs` (`Error::Undialled`,
+`console_says`, `quoted`, `GuestConsole::report`). Until 2026-11-24 the
+console lived in `vm-manager/src/hcs/`, with `broker/wire.rs` (`VERSION`) and
+`os_path.rs` beside it.

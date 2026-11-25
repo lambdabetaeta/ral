@@ -845,7 +845,7 @@ def render_synod_downloads(downloads: dict) -> str:
     """Per-OS installer buttons for the synod landing.
 
     Synod ships as an installer rather than a binary — it carries a guest image
-    and, on Windows, registers a system service — so every target here names an
+    and, on Windows, the OpenVMM binary — so every target here names an
     `installer` rather than exarch's bare `artifact`.  The names are the ones
     build-binaries.yml renames its bundles to, which carry no version, so a
     release bumps nothing here."""

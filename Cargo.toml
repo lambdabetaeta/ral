@@ -6,7 +6,6 @@ members = [
     "exarch",
     "synod",
     "vm-manager",
-    "synod-machine-broker",
     "netgate",
     "guest-abi",
     "ral-guest",
@@ -26,6 +25,9 @@ members = [
 version = "0.10.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+# First-party crates are never published; cargo-about reads this as "ours"
+# and leaves them out of the THIRDPARTY-* notices (packaging/README.md).
+publish = false
 
 # Shared third-party versions.  Member crates point at these with
 # `dep = { workspace = true }` so a version bump happens in one place.

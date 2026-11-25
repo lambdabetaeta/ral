@@ -2,7 +2,6 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
-use std::time::Duration;
 
 use block2::{DynBlock, RcBlock};
 use dispatch2::DispatchQueue;
@@ -17,14 +16,13 @@ use objc2_virtualization::{
 
 use crate::dial::{DialBackend, DialError};
 use crate::error::{Error, Wire};
+use crate::lifecycle::GUEST_DIAL_PATIENCE;
 use crate::site::{Silent, site};
 
 pub(super) enum Ready {
     Started(Result<(), Error>),
     Connected(Wire, OwnedFd),
 }
-
-const GUEST_DIAL_PATIENCE: Duration = Duration::from_secs(5);
 
 pub(super) fn dial(
     queue: &DispatchQueue,

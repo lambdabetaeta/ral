@@ -32,7 +32,7 @@ pub trait Machine: Send {
     fn dial_engine(&self) -> Result<Socket, DialError>;
 
     /// # Errors
-    /// Returns [`DialError::Unsupported`] or the backend's typed dial failure.
+    /// Returns the backend's typed dial failure.
     fn connect_guest(&self, port: u32) -> Result<Socket, DialError>;
 
     fn console(&self) -> GuestConsole;

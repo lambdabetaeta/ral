@@ -1,31 +1,26 @@
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
-# Guest media are resources of tauri.bundle.conf.json alone, so a checkout
-# without a built guest image still compiles synod.
+# Guest media and synod's third-party notices are resources of
+# tauri.bundle.conf.json alone, and OpenVMM of tauri.bundle.windows.conf.json
+# alone, so a checkout without them still compiles synod.
 
-# Bundle synod into a .app and .dmg (needs the Tauri CLI and an arm64 guest image).
+notices := justfile_directory() / 'target' / 'third-party' / 'THIRDPARTY-SYNOD'
+
+# Bundle synod into a .app and .dmg (needs the Tauri CLI, cargo-about and an arm64 guest image).
 [macos]
 bundle:
+    mkdir -p {{quote(parent_directory(notices))}}
+    {{quote(just_executable())}} --justfile {{quote(justfile())}} third-party synod "$(rustc --print host-tuple)" {{quote(notices)}}
     cargo tauri build --config tauri.bundle.conf.json
 
-# Bundle synod into an .msi (needs the Tauri CLI and an amd64 guest image).
+# Bundle synod into an .msi (needs the Tauri CLI, cargo-about, an amd64 guest image and a staged OpenVMM).
 [windows]
-bundle: _broker
-    cargo tauri build --config tauri.bundle.conf.json
+bundle: _openvmm
+    New-Item -ItemType Directory -Force {{quote(parent_directory(notices))}} > $null
+    & {{quote(just_executable())}} --justfile {{quote(justfile())}} third-party synod (rustc --print host-tuple) {{quote(notices)}}
+    cargo tauri build --config tauri.bundle.conf.json --config tauri.bundle.windows.conf.json
 
-# The installer registers the broker as a service, so it is built first.
-_broker:
-    cargo build --release -p synod-machine-broker
-
-# Install the machine broker as a LocalSystem service (elevated shell).
+# The files scripts/build-openvmm.ps1 stages, which the .msi installs beside synod.exe.
 [windows]
-broker-install: _broker
-    sc.exe create SynodMachineBroker binPath= "{{justfile_directory()}}\target\release\synod-machine-broker.exe" DisplayName= "Synod machine broker" type= own start= auto obj= LocalSystem
-    sc.exe description SynodMachineBroker "Creates and stops the virtual machines Synod runs its work in. Synod itself runs without privileges; this service holds the one privilege the platform requires for a virtual machine, and nothing else."
-    sc.exe start SynodMachineBroker
-
-# Stop and remove that service (elevated shell).
-[windows]
-broker-uninstall:
-    -sc.exe stop SynodMachineBroker
-    sc.exe delete SynodMachineBroker
+_openvmm:
+    foreach ($file in 'openvmm.exe', 'LICENSE-OPENVMM', 'THIRDPARTY-OPENVMM') { $path = Join-Path '{{justfile_directory() / 'target' / 'openvmm'}}' $file; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "OpenVMM is not staged: $path is missing; run scripts/build-openvmm.ps1 from the repository root first" } }

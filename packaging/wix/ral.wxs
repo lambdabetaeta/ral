@@ -33,12 +33,13 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
     <!--
-      `Version` and `RalExe` come from the build (`-d` on the `wix build`
-      command line in .github/workflows/build-binaries.yml): the version out
-      of `[workspace.package]` in Cargo.toml, which is the tree's single
-      source of truth for it, and the path to the artifact the
-      `build-windows-allutils` job produced.  Neither is written here, so
-      neither can drift from what was actually built.
+      `Version`, `RalExe` and `ThirdPartyRal` come from the build (`-d` on
+      the `wix build` command line in .github/workflows/build-binaries.yml):
+      the version out of `[workspace.package]` in Cargo.toml, which is the
+      tree's single source of truth for it, the path to the artifact the
+      `build-windows-allutils` job produced, and the third-party notices
+      generated for it.  None is written here, so none can drift from what
+      was actually built.
 
       `UpgradeCode` is the opposite: it is the identity of "ral, the installed
       product" across every version there will ever be, so it is a constant
@@ -94,6 +95,9 @@
             </Component>
             <Component Bitness="always64">
                 <File Id="AttributionNotice" Name="NOTICE" Source="NOTICE" KeyPath="yes" />
+            </Component>
+            <Component Bitness="always64">
+                <File Id="ThirdPartyNotices" Name="THIRDPARTY-RAL" Source="$(var.ThirdPartyRal)" KeyPath="yes" />
             </Component>
         </ComponentGroup>
 

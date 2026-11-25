@@ -1,6 +1,6 @@
 name: CI
-# Every platform runs the same `just lint test`; one more job runs the
-# platform-independent `just docs ui` once.
+# Every platform runs the same `just lint test`; two more jobs run the
+# platform-independent `just docs ui` and the notices check once.
 on:
   push:
     branches: [main]
@@ -69,6 +69,21 @@ jobs:
 
       - run: just lint
       - run: just test
+
+  # Synod's Windows graph exercises the most of packaging/about/about.toml's
+  # clarifications (42 of 52), so drift in their checksums fails here rather
+  # than at release. cargo-about reads the graph, so any runner can resolve it.
+  notices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: just third-party synod x86_64-pc-windows-msvc "$RUNNER_TEMP/THIRDPARTY-SYNOD"
 
   common:
     runs-on: ubuntu-latest

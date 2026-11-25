@@ -13,27 +13,24 @@ use crate::error::{Act, Error, GuestConsole, HostFile, Wire};
 use crate::machine::{Socket, Wires};
 use crate::site::{Silent, site};
 
-const BOOT_TIMEOUT: Duration = Duration::from_mins(1);
+pub(crate) const BOOT_TIMEOUT: Duration = Duration::from_mins(1);
+/// How often a wait that cannot block on its event looks again.
+pub(crate) const PULSE: Duration = Duration::from_millis(50);
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) const GUEST_DIAL_PATIENCE: Duration = Duration::from_secs(5);
+/// The guest formats it on every boot; it is sparse, so only written blocks occupy the host.
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// `OpenVMM`'s RPC socket, bound relative to the session directory.
+pub(crate) const RPC_SOCKET: &str = "r.sock";
+/// `OpenVMM`'s hybrid vsock relay; a guest→host listener for port `n` is `v.sock_n`.
+pub(crate) const VSOCK: &str = "v.sock";
 const STOP_GRACE: Duration = Duration::from_secs(5);
-const STOP_PULSE: Duration = Duration::from_millis(50);
 const REMOVE_GRACE: Duration = Duration::from_secs(2);
 const REMOVE_PULSE: Duration = Duration::from_millis(100);
 const ORPHAN_AGE: Duration = Duration::from_hours(1);
 const LEASE: &str = "lease";
-
-pub(crate) enum Leaf {
-    Raw,
-    Vhd,
-}
-
-impl Leaf {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Raw => "session.img",
-            Self::Vhd => "session.vhd",
-        }
-    }
-}
+const DISK: &str = "session.img";
 
 pub(crate) fn unix_seconds() -> u64 {
     SystemTime::now()
@@ -46,7 +43,10 @@ pub(crate) fn aside_spelling(path: &Path) -> String {
 }
 
 pub(crate) enum Missed {
-    Timeout(String),
+    Timeout,
+    /// The guest ended its machine first; only `OpenVMM` reports it.
+    #[cfg(any(windows, test))]
+    Ended(crate::error::PowerEvent),
     Failed(Error),
 }
 
@@ -54,6 +54,7 @@ pub(crate) fn await_dials(
     hypervisor: &'static str,
     mut accept: impl FnMut(Wire, Duration) -> Result<Socket, Missed>,
     console: impl FnOnce() -> Option<GuestConsole>,
+    hypervisor_log: Option<&Path>,
 ) -> Result<Wires, Error> {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let mut dial = |wire| {
@@ -63,22 +64,32 @@ pub(crate) fn await_dials(
     let outcome =
         dial(Wire::Control).and_then(|control| dial(Wire::Net).map(|net| Wires { control, net }));
     outcome.map_err(|failure| match *failure {
-        (wire, Missed::Timeout(cause)) => Error::Undialled {
-            hypervisor: hypervisor.into(),
+        (wire, Missed::Timeout) => Error::Undialled {
+            hypervisor,
             wire,
             within_secs: BOOT_TIMEOUT.as_secs(),
-            cause,
             console: console(),
+            hypervisor_log: hypervisor_log.map(Path::to_path_buf),
+        },
+        #[cfg(any(windows, test))]
+        (wire, Missed::Ended(how)) => Error::EndedBeforeDial {
+            hypervisor,
+            wire,
+            how,
+            console: console(),
+            hypervisor_log: hypervisor_log.map(Path::to_path_buf),
         },
         (_, Missed::Failed(error)) => error,
     })
 }
 
+/// # Errors
+/// Returns the state or force refusal, or [`Error::ForcedStop`] once a forced stop succeeds.
 pub(crate) fn stop_within(
     hypervisor: &'static str,
     request: impl FnOnce(),
     mut stopped: impl FnMut() -> Result<bool, Error>,
-    force: impl FnOnce(),
+    force: impl FnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
     request();
     let deadline = Instant::now() + STOP_GRACE;
@@ -88,13 +99,13 @@ pub(crate) fn stop_within(
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            force();
+            force()?;
             return Err(Error::ForcedStop {
-                hypervisor: hypervisor.into(),
+                hypervisor,
                 grace_secs: STOP_GRACE.as_secs(),
             });
         }
-        thread::sleep(STOP_PULSE.min(left));
+        thread::sleep(PULSE.min(left));
     }
 }
 
@@ -105,9 +116,9 @@ pub(crate) struct SessionDisk {
 }
 
 impl SessionDisk {
+    /// The one place a session directory is made, private from its creation.
     pub(crate) fn create(
         parent: &Path,
-        leaf: Leaf,
         make: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> Result<Self, Error> {
         site!(Silent::SessionDiskCreate, fs::create_dir_all(parent)).map_err(Error::host_file(
@@ -115,21 +126,25 @@ impl SessionDisk {
             Act::Make,
             parent,
         ))?;
+        // tempfile names and retries on collision; the directory is ours to keep.
         let dir = tempfile::Builder::new()
             .prefix(&format!(
                 "ral-vm-session-{}-{}-",
                 unix_seconds(),
                 std::process::id()
             ))
-            .tempdir_in(parent)
+            .disable_cleanup(true)
+            .make_in(parent, |dir| {
+                private_directory(dir).map(|()| dir.to_path_buf())
+            })
             .map_err(Error::host_file(
                 HostFile::SessionDirectory,
                 Act::Create,
                 parent,
             ))?
-            .keep();
+            .into_file();
         let mut session = Self {
-            disk: dir.join(leaf.name()),
+            disk: dir.join(DISK),
             dir,
             lease: None,
         };
@@ -158,14 +173,22 @@ impl SessionDisk {
     pub(crate) fn path(&self) -> &Path {
         &self.disk
     }
+
+    #[cfg(windows)]
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
 }
 
 impl Drop for SessionDisk {
+    /// The lease goes only with everything else, so a sweep can still reclaim what stays behind.
     fn drop(&mut self) {
+        let sockets = remove_sockets(&self.dir);
         let outcome = remove_disk(&self.disk);
         let disk_removed = outcome.is_ok();
         drop(self.lease.take());
-        let outcome = outcome
+        let outcome = sockets
+            .and(outcome)
             .and_then(|()| remove_file(&self.dir.join(LEASE)))
             .and_then(|()| site!(Silent::SessionDiskRelease, fs::remove_dir(&self.dir)));
         if let Err(why) = outcome {
@@ -191,11 +214,27 @@ impl Drop for SessionDisk {
     }
 }
 
+#[cfg(unix)]
+fn private_directory(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    site!(Silent::SessionDiskCreate, fs::DirBuilder::new().mode(0o700) => create(dir))
+}
+
+#[cfg(windows)]
+use crate::openvmm::win::private_directory;
+
 fn remove_file(path: &Path) -> io::Result<()> {
     match site!(Silent::SessionDiskRelease, fs::remove_file(path)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
+}
+
+fn remove_sockets(dir: &Path) -> io::Result<()> {
+    site!(Silent::SessionDiskRelease, fs::read_dir(dir))?
+        .filter_map(Result::ok)
+        .filter(is_socket)
+        .try_for_each(|entry| remove_file(&entry.path()))
 }
 
 fn remove_disk(path: &Path) -> io::Result<()> {
@@ -253,10 +292,15 @@ fn session_epoch(name: &str) -> Option<u64> {
 fn sweep_directory(dir: &Path) -> io::Result<u64> {
     let mut disk = None;
     let mut lease = None;
+    let mut sockets = Vec::new();
     let mut empty = true;
     for entry in site!(Silent::SessionDiskSweep, fs::read_dir(dir))? {
         let entry = entry?;
         empty = false;
+        if is_socket(&entry) {
+            sockets.push(entry.path());
+            continue;
+        }
         if !entry.file_type()?.is_file() || is_reparse(&entry) {
             return Err(io::Error::other(
                 "session directory contains a link or non-file entry",
@@ -265,7 +309,7 @@ fn sweep_directory(dir: &Path) -> io::Result<u64> {
         let name = entry.file_name();
         if name == LEASE {
             lease = Some(entry.path());
-        } else if (name == Leaf::Raw.name() || name == Leaf::Vhd.name()) && disk.is_none() {
+        } else if name == DISK && disk.is_none() {
             disk = Some(entry.path());
         } else {
             return Err(io::Error::other(
@@ -296,6 +340,9 @@ fn sweep_directory(dir: &Path) -> io::Result<u64> {
     }
     probe.try_lock().map_err(io::Error::from)?;
     drop(probe);
+    for socket in sockets {
+        site!(Silent::SessionDiskSweep, fs::remove_file(&socket))?;
+    }
     let bytes = if let Some(disk) = disk {
         let bytes = site!(Silent::SessionDiskMeasure, fs::metadata(&disk))?.len();
         site!(Silent::SessionDiskSweep, fs::remove_file(&disk))?;
@@ -306,6 +353,62 @@ fn sweep_directory(dir: &Path) -> io::Result<u64> {
     site!(Silent::SessionDiskSweep, fs::remove_file(&lease))?;
     site!(Silent::SessionDiskSweep, fs::remove_dir(dir))?;
     Ok(bytes)
+}
+
+/// Ours alone: named `r.sock`, `v.sock` or `v.sock_<digits>`, and an `AF_UNIX` socket,
+/// never a link or a file.
+fn is_socket(entry: &fs::DirEntry) -> bool {
+    let name = entry.file_name();
+    let name = name.as_encoded_bytes();
+    let ours = name == RPC_SOCKET.as_bytes()
+        || name == VSOCK.as_bytes()
+        || name
+            .strip_prefix(VSOCK.as_bytes())
+            .and_then(|rest| rest.strip_prefix(b"_"))
+            .is_some_and(|port| !port.is_empty() && port.iter().all(u8::is_ascii_digit));
+    ours && is_af_unix(entry)
+}
+
+#[cfg(unix)]
+fn is_af_unix(entry: &fs::DirEntry) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    entry.file_type().is_ok_and(|kind| kind.is_socket())
+}
+
+/// Windows marks an `AF_UNIX` socket only by its reparse tag.
+#[cfg(windows)]
+fn is_af_unix(entry: &fs::DirEntry) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FileAttributeTagInfo,
+        GetFileInformationByHandleEx,
+    };
+    /// `afunix.h`; the bindings carry it only in a feature this crate does not otherwise need.
+    const IO_REPARSE_TAG_AF_UNIX: u32 = 0x8000_0023;
+
+    let path = entry.path();
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let Ok(file) = site!(Silent::SessionSocketProbe, options => open(&path)) else {
+        return false;
+    };
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: a live handle and a writable buffer of exactly the size given.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).expect("a small struct"),
+        )
+    };
+    read != 0
+        && tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && tag.ReparseTag == IO_REPARSE_TAG_AF_UNIX
 }
 
 fn is_reparse(entry: &fs::DirEntry) -> bool {
@@ -329,13 +432,14 @@ fn is_reparse(entry: &fs::DirEntry) -> bool {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::error::PowerEvent;
     use std::cell::Cell;
 
     fn abandoned(parent: &Path, name: &str) -> PathBuf {
         let dir = parent.join(name);
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join(LEASE), b"").unwrap();
-        fs::write(dir.join(Leaf::Raw.name()), b"disk").unwrap();
+        fs::write(dir.join(DISK), b"disk").unwrap();
         dir
     }
 
@@ -350,7 +454,7 @@ mod tests {
             .unwrap();
         lease.try_lock().unwrap();
         sweep(parent.path());
-        assert!(dir.join(Leaf::Raw.name()).exists());
+        assert!(dir.join(DISK).exists());
         drop(lease);
     }
 
@@ -373,7 +477,7 @@ mod tests {
             &format!("ral-vm-session-{}-123-young", unix_seconds()),
         );
         sweep(parent.path());
-        assert!(dir.join(Leaf::Raw.name()).exists());
+        assert!(dir.join(DISK).exists());
     }
 
     #[test]
@@ -384,7 +488,7 @@ mod tests {
         let malformed = abandoned(parent.path(), "ral-vm-session-0-abc-malformed");
         sweep(parent.path());
         for dir in [&dir, &malformed] {
-            assert!(dir.join(Leaf::Raw.name()).exists());
+            assert!(dir.join(DISK).exists());
             assert!(dir.join(LEASE).exists());
         }
         assert!(dir.join("unknown").exists());
@@ -425,7 +529,7 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let target = parent.path().join("target");
         fs::write(&target, b"keep").unwrap();
-        for leaf in [LEASE, Leaf::Raw.name()] {
+        for leaf in [LEASE, DISK] {
             let dir = parent.path().join(format!("ral-vm-session-0-123-{leaf}"));
             fs::create_dir(&dir).unwrap();
             std::os::unix::fs::symlink(&target, dir.join(leaf)).unwrap();
@@ -435,11 +539,43 @@ mod tests {
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 3);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn our_sockets_are_reclaimed_and_any_other_keeps_the_directory() {
+        use std::os::unix::net::UnixListener;
+        let parent = tempfile::tempdir().unwrap();
+        let ours = abandoned(parent.path(), "ral-vm-session-0-123-ours");
+        let listeners: Vec<_> = [RPC_SOCKET, VSOCK, "v.sock_1729"]
+            .into_iter()
+            .map(|name| UnixListener::bind(ours.join(name)).unwrap())
+            .collect();
+        let stranger = abandoned(parent.path(), "ral-vm-session-0-123-stranger");
+        let _stranger = UnixListener::bind(stranger.join("v.sock_")).unwrap();
+        let impostor = abandoned(parent.path(), "ral-vm-session-0-123-impostor");
+        fs::write(impostor.join(VSOCK), b"a file, not a socket").unwrap();
+        sweep(parent.path());
+        assert!(!ours.exists());
+        assert!(stranger.join(DISK).exists());
+        assert!(impostor.join(VSOCK).exists());
+        drop(listeners);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_session_takes_its_sockets_with_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let session = SessionDisk::create(parent.path(), |disk| disk.set_len(8)).unwrap();
+        let dir = session.path().parent().unwrap().to_path_buf();
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join("v.sock_1730")).unwrap();
+        drop(session);
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
     #[test]
     fn two_creates_have_distinct_directories_and_release_them() {
         let parent = tempfile::tempdir().unwrap();
-        let first = SessionDisk::create(parent.path(), Leaf::Raw, |disk| disk.set_len(8)).unwrap();
-        let second = SessionDisk::create(parent.path(), Leaf::Raw, |disk| disk.set_len(8)).unwrap();
+        let first = SessionDisk::create(parent.path(), |disk| disk.set_len(8)).unwrap();
+        let second = SessionDisk::create(parent.path(), |disk| disk.set_len(8)).unwrap();
         assert_ne!(first.path().parent(), second.path().parent());
         assert_eq!(first.path().metadata().unwrap().len(), 8);
         drop((first, second));
@@ -449,9 +585,7 @@ mod tests {
     #[test]
     fn a_failed_writer_leaves_no_directory() {
         let parent = tempfile::tempdir().unwrap();
-        let result = SessionDisk::create(parent.path(), Leaf::Raw, |_| {
-            Err(io::Error::other("writer failed"))
-        });
+        let result = SessionDisk::create(parent.path(), |_| Err(io::Error::other("writer failed")));
         assert!(matches!(
             result,
             Err(Error::HostFile {
@@ -469,9 +603,10 @@ mod tests {
             |wire, patience| {
                 assert!(matches!(wire, Wire::Control));
                 assert!(patience <= BOOT_TIMEOUT);
-                Err(Missed::Timeout("no dial".into()))
+                Err(Missed::Timeout)
             },
             || Some(GuestConsole::Unkept),
+            None,
         );
         assert!(matches!(
             result,
@@ -490,6 +625,7 @@ mod tests {
             "test",
             |_, _| Err(Missed::Failed(Error::NoBackend)),
             || panic!("no console for a backend error"),
+            None,
         );
         assert!(matches!(result, Err(Error::NoBackend)));
     }
@@ -507,10 +643,11 @@ mod tests {
                 }
                 Wire::Net => {
                     assert!(patience <= first_patience.unwrap());
-                    Err(Missed::Timeout("net absent".into()))
+                    Err(Missed::Timeout)
                 }
             },
             || None,
+            None,
         );
         assert!(matches!(
             result,
@@ -548,7 +685,7 @@ mod tests {
     fn a_held_disk_is_released_after_the_worker_closes_it() {
         use std::os::windows::fs::OpenOptionsExt;
         let parent = tempfile::tempdir().unwrap();
-        let session = SessionDisk::create(parent.path(), Leaf::Vhd, |_| Ok(())).unwrap();
+        let session = SessionDisk::create(parent.path(), |_| Ok(())).unwrap();
         let held = OpenOptions::new()
             .read(true)
             .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
@@ -566,7 +703,15 @@ mod tests {
     #[test]
     fn a_stop_deadline_forces_once_and_reports_the_grace() {
         let forced = Cell::new(0);
-        let result = stop_within("test", || {}, || Ok(false), || forced.set(forced.get() + 1));
+        let result = stop_within(
+            "test",
+            || {},
+            || Ok(false),
+            || {
+                forced.set(forced.get() + 1);
+                Ok(())
+            },
+        );
         assert_eq!(forced.get(), 1);
         assert!(matches!(
             result,
@@ -574,6 +719,31 @@ mod tests {
                 hypervisor,
                 grace_secs: 5,
             }) if hypervisor == "test"
+        ));
+    }
+
+    #[test]
+    fn a_failed_force_is_reported_rather_than_a_forced_stop() {
+        let result = stop_within("test", || {}, || Ok(false), || Err(Error::NoBackend));
+        assert!(matches!(result, Err(Error::NoBackend)));
+    }
+
+    #[test]
+    fn a_machine_that_ends_first_is_not_reported_as_a_timeout() {
+        let result = await_dials(
+            "test",
+            |_, _| Err(Missed::Ended(PowerEvent::Reset)),
+            || None,
+            Some(Path::new("vmm.log")),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::EndedBeforeDial {
+                wire: Wire::Control,
+                how: PowerEvent::Reset,
+                hypervisor_log: Some(log),
+                ..
+            }) if log == Path::new("vmm.log")
         ));
     }
 }

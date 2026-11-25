@@ -2,6 +2,7 @@
 name = "ral"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 license = "Apache-2.0"
 default-run = "ral"
 
@@ -70,6 +71,7 @@ assets = [
     { source = "../LICENSE-APACHE", dest = "/usr/share/doc/ral/LICENSE-APACHE", mode = "644" },
     { source = "../LICENSE-MIT", dest = "/usr/share/doc/ral/LICENSE-MIT", mode = "644" },
     { source = "../NOTICE", dest = "/usr/share/doc/ral/NOTICE", mode = "644" },
+    { source = "../target/third-party/THIRDPARTY-RAL", dest = "/usr/share/doc/ral/THIRDPARTY-RAL", mode = "644" },
 ]
 
 [build-dependencies]

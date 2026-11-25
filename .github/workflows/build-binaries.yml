@@ -112,12 +112,20 @@ jobs:
           cargo build --release -p ${{ matrix.pkg }} --target ${{ matrix.target }} \
             ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
           mv target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.out }}
+      # The packager generates the archive's third-party notices.
+      - uses: extractions/setup-just@v4
+        if: startsWith(matrix.artifact, 'release-')
+      - uses: taiki-e/install-action@v2
+        if: startsWith(matrix.artifact, 'release-')
+        with:
+          tool: cargo-about@0.9.3
       - name: Package binary and legal files
         if: startsWith(matrix.artifact, 'release-')
         shell: bash
         run: |
           bash scripts/package-release.sh '${{ matrix.out }}' \
-            '${{ matrix.out == 'exarch-windows.exe' && 'exarch-windows.zip' || format('{0}.tar.gz', matrix.out) }}'
+            '${{ matrix.out == 'exarch-windows.exe' && 'exarch-windows.zip' || format('{0}.tar.gz', matrix.out) }}' \
+            '${{ matrix.target }}' ${{ matrix.features }}
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
@@ -146,6 +154,13 @@ jobs:
         with:
           name: payload-windows
           path: payload
+      - uses: extractions/setup-just@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      # The payload's target and features, as its `build` entry has them.
+      - name: Generate third-party notices
+        run: just third-party ral x86_64-pc-windows-msvc THIRDPARTY-RAL allutils
       - name: Install WiX
         run: |
           dotnet tool install --global wix --version 7.0.0
@@ -164,6 +179,7 @@ jobs:
             -bindpath packaging/wix `
             -d Version=$version `
             -d RalExe=payload/ral.exe `
+            -d ThirdPartyRal=THIRDPARTY-RAL `
             -o ral-windows.msi
       - uses: actions/upload-artifact@v7
         with:
@@ -201,6 +217,70 @@ jobs:
             vm-image/out/rootfs/rootfs.img.sha256
           if-no-files-found: error
 
+  # The OpenVMM that synod's .msi installs beside synod.exe.  The script holds
+  # the pin and the build flags, packaging/about/ the notices' config and
+  # templates, and CARGO_ABOUT their generator, so all three key the cache.
+  openvmm:
+    name: openvmm
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_ABOUT: cargo-about@0.9.3
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore built OpenVMM
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/openvmm/openvmm.exe
+            target/openvmm/LICENSE-OPENVMM
+            target/openvmm/THIRDPARTY-OPENVMM
+          key: openvmm-${{ env.CARGO_ABOUT }}-${{ hashFiles('scripts/build-openvmm.ps1', 'packaging/about/**') }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.restore.outputs.cache-hit != 'true'
+      # Upstream's protoc version.  The release zip keeps include/ beside bin/,
+      # where protoc finds the well-known types.
+      - name: Install protoc
+        if: steps.restore.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "protoc.zip"
+          Invoke-WebRequest -UseBasicParsing -OutFile $zip `
+            -Uri https://github.com/protocolbuffers/protobuf/releases/download/v27.1/protoc-27.1-win64.zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne "da531c51ccd1290d8d34821f0ce4e219c7fbaa6f9825f5a3fb092a9d03fe6206") {
+            throw "protoc-27.1-win64.zip checksum mismatch: $actual"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP "protoc"
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          "PROTOC=$(Join-Path $dir 'bin\protoc.exe')" >> $env:GITHUB_ENV
+      - uses: taiki-e/install-action@v2
+        if: steps.restore.outputs.cache-hit != 'true'
+        with:
+          tool: ${{ env.CARGO_ABOUT }}
+      - name: Build OpenVMM
+        if: steps.restore.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: scripts/build-openvmm.ps1
+      - name: Save built OpenVMM
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            target/openvmm/openvmm.exe
+            target/openvmm/LICENSE-OPENVMM
+            target/openvmm/THIRDPARTY-OPENVMM
+          key: ${{ steps.restore.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openvmm
+          path: |
+            target/openvmm/openvmm.exe
+            target/openvmm/LICENSE-OPENVMM
+            target/openvmm/THIRDPARTY-OPENVMM
+          if-no-files-found: error
+
   # Installers renamed to a version-free name, so download links stay stable.
   #
   # macOS is ad-hoc signed (carries the virtualization entitlement) but not
@@ -208,7 +288,9 @@ jobs:
   # available in secrets.
   synod-bundle:
     name: ${{ matrix.out }}
-    needs: guest-image
+    needs: [guest-image, openvmm]
+    # A failed OpenVMM build fails only the .msi leg, at its download.
+    if: ${{ !cancelled() && needs.guest-image.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -230,9 +312,17 @@ jobs:
         with:
           name: guest-image-${{ matrix.arch }}
           path: vm-image/out
+      - uses: actions/download-artifact@v8
+        if: runner.os == 'Windows'
+        with:
+          name: openvmm
+          path: target/openvmm
       - name: Install the Tauri CLI
         shell: bash
         run: cargo install tauri-cli --version "^2" --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
       - uses: extractions/setup-just@v4
       - run: just synod::bundle
       - name: Name the artifact

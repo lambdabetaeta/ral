@@ -90,8 +90,9 @@ answerable for it),
 [[map/synod|synod]] (where the backend and its cache live).
 
 Cite: `vm-manager/src/lifecycle.rs` (`REMOVE_GRACE`, `REMOVE_PULSE`,
-`ORPHAN_AGE`, `SessionDisk`, `sweep`), `vm-manager/src/hcs/vhd.rs`
-(`ensure_rootfs_vhd`), `vm-manager/src/vz/config.rs`.
+`ORPHAN_AGE`, `SessionDisk`, `SESSION_BYTES`, `sweep`),
+`vm-manager/src/openvmm/win.rs` (sparse creation, `private_directory`). Until
+2026-11-24 the VHDs were made in `vm-manager/src/hcs/vhd.rs`.
 
 > **Amended 2026-10-27.**
 > Both backends use `vm-manager/src/lifecycle.rs`: `SessionDisk` owns a unique
@@ -107,3 +108,22 @@ Cite: `vm-manager/src/lifecycle.rs` (`REMOVE_GRACE`, `REMOVE_PULSE`,
 >
 > This supplies the macOS sweep raised in the open question above; lease
 > ownership, age and recognised contents govern reclamation on both platforms.
+
+> **Amended 2026-11-24.** See
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. There is no
+> `vmwp`, VHD, `Leaf` or machine cache. The race this page was written for came
+> from `vmwp`. Under OpenVMM the disk's only holder is a process that has
+> exited and been reaped before removal begins. The bounded retry, the named
+> leak and the aged, leased sweep all stand.
+> - **One session directory:** on both platforms `SessionDisk::create` makes
+>   `<temp>\ral-vm-session-<epoch>-<pid>-<rand>\`. The disk is always a sparse
+>   raw `session.img` of `lifecycle::SESSION_BYTES` (8 GiB); Windows marks it
+>   sparse with `FSCTL_SET_SPARSE` before sizing it. The directory is private
+>   from creation: on Windows `CreateDirectoryW` is given a protected DACL
+>   (SYSTEM, Administrators, the owner), and on Unix it is made with mode
+>   `0700` (tempfile's own mode is `0777` less the umask).
+> - **Sockets:** the directory also holds OpenVMM's `r.sock` and `v.sock` and
+>   Synod's `v.sock_<port>` listeners. One predicate recognises them: those
+>   names, each an `IO_REPARSE_TAG_AF_UNIX` reparse point. `Drop` and `sweep`
+>   share it, so the sweep, which still skips every other reparse point, can
+>   reclaim a crashed session's sockets.

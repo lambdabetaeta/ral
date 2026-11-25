@@ -1,0 +1,53 @@
+{{!--
+  The plain-text THIRDPARTY-* notices; packaging/README.md says how they are made.
+
+  A licence without a source_path is cargo-about's SPDX reference text, used
+  when it found no text in the crate: it carries no copyright line. Rendering
+  it looks up a partial named after each crate using it, so an unlisted crate
+  stops generation with "Partial not found <crate>": clarify that crate in
+  about.toml. Only crates that publish no licence text anywhere, neither in
+  the crate nor in its repository, are listed here.
+--~}}
+{{#*inline "crc32c"}}{{/inline~}}
+{{#*inline "intl_pluralrules"}}{{/inline~}}
+{{#*inline "tui-math"}}{{/inline~}}
+{{!-- No repository to fetch a text from. --~}}
+{{#*inline "win_etw_metadata"}}{{/inline~}}
+{{!-- The objc2 repository's LICENSE.md names its licences without their texts. --~}}
+{{#*inline "block2"}}{{/inline~}}
+{{#*inline "dispatch2"}}{{/inline~}}
+{{#*inline "objc2"}}{{/inline~}}
+{{#*inline "objc2-app-kit"}}{{/inline~}}
+{{#*inline "objc2-core-foundation"}}{{/inline~}}
+{{#*inline "objc2-core-graphics"}}{{/inline~}}
+{{#*inline "objc2-core-services"}}{{/inline~}}
+{{#*inline "objc2-encode"}}{{/inline~}}
+{{#*inline "objc2-exception-helper"}}{{/inline~}}
+{{#*inline "objc2-foundation"}}{{/inline~}}
+{{#*inline "objc2-quartz-core"}}{{/inline~}}
+{{#*inline "objc2-virtualization"}}{{/inline~}}
+{{#*inline "objc2-web-kit"}}{{/inline~}}
+THIRD-PARTY SOFTWARE NOTICES
+
+The binary this file accompanies contains the third-party Rust crates listed
+below, each used under the licence it is listed with. Every crate's source is
+available from its repository, or from https://crates.io/crates/NAME/VERSION.
+
+Licences:
+{{#each overview}}
+  {{{name}}} ({{{id}}}): {{count}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}}), used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} {{{crate.repository}}}{{/if}}
+{{/each}}
+{{#unless source_path}}
+{{#each used_by}}{{> (lookup crate "name")}}{{/each}}
+The crates above publish no licence text; the SPDX reference text follows.
+{{/unless}}
+
+{{{text}}}
+{{/each}}

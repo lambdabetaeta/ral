@@ -2,7 +2,7 @@
 
 This directory builds `rootfs.img`: the **read-only Ubuntu 26.04 LTS (resolute)
 office userland** that synod boots inside its guest VM, for either of §2's two
-guests — **arm64** for Virtualization.framework on macOS, **amd64** for Hyper-V
+guests — **arm64** for Virtualization.framework on macOS, **amd64** for OpenVMM
 on Windows. It is one of the three disks in SYNOD.md §7's stack:
 
 > §7 pins **26.04 LTS**, the current LTS — a question this pipeline settled by
@@ -96,9 +96,9 @@ versioned with the app so the `Attach` handshake can enforce the pairing (§7).
 ## Two guests, one recipe
 
 §2 fixes the platform matrix: macOS runs Virtualization.framework on arm64,
-Windows runs Hyper-V on x86_64. The *userland* does not care — an office
-userland is an office userland — so both scripts derive everything from the
-host's architecture (see *Building*):
+Windows runs OpenVMM on the Windows Hypervisor Platform on x86_64. The
+*userland* does not care — an office userland is an office userland — so both
+scripts derive everything from the host's architecture (see *Building*):
 
 | | arm64 | amd64 |
 |---|---|---|
@@ -106,7 +106,7 @@ host's architecture (see *Building*):
 | Mirror | `ports.ubuntu.com/ubuntu-ports` | `archive.ubuntu.com/ubuntu` |
 | Rust target (boot media) | `aarch64-unknown-linux-musl` | `x86_64-unknown-linux-musl` |
 | Kernel handed to the loader | raw ARM64 `Image` | x86 `bzImage` |
-| Guest device model | virtio | Hyper-V VMBus |
+| Guest device model | virtio | VMBus, plus virtio-fs on VPCI |
 
 Two consequences worth stating before they surprise anyone:
 
@@ -192,18 +192,6 @@ knobs). The multi-GB tree and apt cache live only in the
 container's ephemeral layer (`--rm`) and are reclaimed on exit; only the final
 artifacts are written to `out/rootfs/`, via a staging dir that is published only once
 the build has stamped itself done (podman's exit status is not trusted).
-
-### What this pipeline does NOT do
-
-**It does not produce a VHD or VHDX.** The output is a raw ext4 image on both
-architectures, which is what §7 fixes as the on-disk format and what the
-overlayfs lower/upper split is described against. Hyper-V does need the image
-wrapped — as a *fixed* VHD, which is that same byte stream with a 512-byte
-footer appended — and that wrapping is done **in Rust by the Windows backend at
-first boot**, from these very bytes. Doing it here as well would ship a second
-format, double the download, and give the two platforms two different artifacts
-to checksum for no gain. If you came here to add it: it is already done, one
-layer up.
 
 ### mmdebstrap over debootstrap; `minbase`; Recommends off
 
@@ -313,14 +301,14 @@ non-fatal.
 The lower layer is read-only, so a **squashfs** image would be the natural fit:
 compressed on disk (much smaller at rest than even a snug ext4), mounted
 directly with no unpack step, and inherently immutable. We are **not** taking it
-now for one concrete reason: §7 fixes the on-disk format as *raw ext4 images*
-because the Windows path hands Hyper-V the same bytes wrapped as a **fixed VHD**
-(a footer, appended at first boot — see *What this pipeline does NOT do*), and
-the overlayfs lower/upper split is described against ext4 block devices. A
-squashfs lower would need both the wrapping and the overlay stories re-examined
-on Windows. It stays a live option — the `.zst` we ship already recovers most of
-the at-rest size win for the download — but the format is load-bearing for the
-Windows port, so changing it is not a rootfs-only decision.
+now for one concrete reason: §7 fixes the on-disk format as *raw ext4 images*,
+which both hypervisors attach byte for byte (virtio-blk under
+Virtualization.framework, VMBus SCSI under OpenVMM), and the overlayfs
+lower/upper split is described against ext4 block devices. A squashfs lower
+would need the overlay story re-examined on both ports. It stays a live option —
+the `.zst` we ship already recovers most of the at-rest size win for the
+download — but the format is load-bearing for both ports, so changing it is not
+a rootfs-only decision.
 
 ### Distribution: download the CI artifact, or build it on the user's machine?
 
@@ -375,12 +363,13 @@ architecture, and one container of the guest's own architecture.
 **The kernel is Ubuntu's stock `linux-generic` build for the guest's
 architecture, unmodified — not a custom kernel.** It is already built, signed,
 and validated by Canonical's own pipeline across the exact feature set the two
-hypervisor paths need between them — virtio and virtiofs on one side, Hyper-V
-(`CONFIG_HYPERV`, `CONFIG_HYPERV_VSOCKETS`) and 9p on the other, `vsock`,
-overlayfs and ext4 on both — so lifting it trades zero engineering cost for a
-small boot-time module-load cost that a from-scratch kernel config and rebuild
-would only marginally improve — while creating a liability (kernel config
-maintenance, security patch tracking) this project would then own forever.
+hypervisor paths need between them — VMBus (`CONFIG_HYPERV`,
+`CONFIG_HYPERV_VSOCKETS`, `CONFIG_PCI_HYPERV`) on amd64; virtio, virtiofs,
+`vsock`, overlayfs and ext4 on both — so lifting it trades zero engineering
+cost for a small boot-time module-load cost that a from-scratch kernel config
+and rebuild would only marginally improve — while creating a liability (kernel
+config maintenance, security patch tracking) this project would then own
+forever.
 `build-boot.sh` extracts `vmlinuz` and the needed `.ko` set straight from the
 pinned suite's own `linux-image-generic` package for that architecture, inside
 the same container that builds `rootfs.img`, so kernel and userland share one
@@ -394,7 +383,7 @@ pinned suite and mirror.
   compressed payload, nested differently per suite. So the arm64 path *peels*:
   one layer at a time, refusing any format it does not recognise, until `file`
   agrees it is an `ARM64 boot executable`.
-- **amd64.** Hyper-V's `LinuxKernelDirect` loader boots a **bzImage**, and
+- **amd64.** OpenVMM's direct Linux boot loads a **bzImage**, and
   Ubuntu's `vmlinuz-*-generic` for amd64 already *is* one. So the amd64 path
   unwraps **nothing**: the bytes are copied through and asserted to be a "Linux
   kernel x86 boot executable bzImage". Peeling here would be actively wrong —
@@ -453,11 +442,11 @@ So the table below is the *question* the build asks of the kernel config, not a
 list of files: a driver named here is carried only if this kernel built it as a
 module, and several are compiled in.
 
-| Concern | arm64 (Virtualization.framework) | amd64 (Hyper-V) |
+| Concern | arm64 (Virtualization.framework) | amd64 (OpenVMM) |
 |---|---|---|
-| Bus / devices | `virtio`, `virtio_ring`, `virtio_mmio`, `virtio_pci`, `virtio_blk` | `hv_vmbus`, `hv_storvsc`, `hv_utils`, `hv_balloon` |
+| Bus / devices | `virtio`, `virtio_mmio`, `virtio_pci`, `virtio_blk` | `hv_vmbus`, `hv_storvsc`, `hv_utils`, `hv_balloon`, `pci-hyperv`, `virtio`, `virtio_pci` |
 | Control plane (`AF_VSOCK`) | `vsock` + `vmw_vsock_virtio_transport` | `vsock` + `hv_sock` |
-| Granted folder | `virtiofs` | `9p` + `9pnet` + `9pnet_fd` |
+| Granted folder | `virtiofs` | `virtiofs` + `fuse` |
 | Overlay + disks | `overlay`, `ext4` | `overlay`, `ext4`, `scsi_mod`, `sd_mod` |
 | Console | `hvc0` (`virtio_console`) | `ttyS0` (8250, compiled in) |
 
@@ -477,17 +466,16 @@ The amd64 column earns its differences one at a time:
   declined on arm64; `CONFIG_VIRTIO_VSOCKETS` is recorded and declined on amd64.
   Above either one the guest speaks the same `AF_VSOCK` API, which is the whole
   reason §2 can promise "the guest-side code is identical on both".
-- **The workspace arrives differently.** There is no virtiofs on Hyper-V, so the
-  granted folder is a **9p (9p2000.L) share the host serves over a vsock port**:
-  `9p` (the filesystem) over `9pnet` (the protocol core) over **`9pnet_fd`**.
-  That last module is the trap worth naming: `trans=fd` used to be compiled
-  *inside* `9pnet`, and in a kernel new enough to have split it out
-  (`CONFIG_NET_9P_FD`, upstream `9pnet_fd-objs := trans_fd.o`) a mount with
-  `9pnet` loaded and `9pnet_fd` missing fails with a bare `ENODEV`. Ubuntu's
-  resolute kernel (7.0.0) builds all three as modules, and `9p` pulls the
-  `netfs` core in through its own `modules.dep` line — so a resolute amd64 build
-  ships eleven files: `hv_vmbus`, `hv_storvsc`, `hv_utils`, `hv_balloon`,
-  `vsock`, `hv_sock`, `9pnet`, `9pnet_fd`, `netfs`, `9p`, `overlay`.
+- **The workspace is the same filesystem on another transport.** OpenVMM
+  serves virtio-fs as a PCI device on a VMBus-tunnelled PCI bus (VPCI):
+  `pci-hyperv` brings the bus up, `virtio_pci` binds the device and `virtiofs`
+  mounts it. Ubuntu's resolute kernel (7.0.0) builds `virtio`, `virtio_pci` and
+  `fuse` in (`virtio_ring` is built with `CONFIG_VIRTIO`; it has no symbol of
+  its own). `pci-hyperv` pulls
+  `pci-hyperv-intf` and `hv_storvsc` pulls `scsi_transport_fc` through
+  `modules.dep` — so a resolute amd64 build ships eleven files: `hv_vmbus`,
+  `pci-hyperv-intf`, `pci-hyperv`, `scsi_transport_fc`, `virtiofs`, `overlay`,
+  `vsock`, `hv_balloon`, `hv_utils`, `hv_storvsc`, `hv_sock`.
 - **SCSI and ext4 are compiled in.** `CONFIG_SCSI`, `CONFIG_BLK_DEV_SD` and
   `CONFIG_EXT4_FS` are `=y` in Ubuntu's amd64 config, so nothing is shipped for
   them — but they are named in the table anyway, so that a kernel which makes
@@ -518,10 +506,10 @@ real artifacts, and confirm on stdout `ral-guest`'s own `eprintln` lines
 (`guest filesystems up`, `engine running as pid`), that `announce_root()`
 reports the session overlay rather than a fallback, and that the guest dials
 the host's vsock control port within `lifecycle::BOOT_TIMEOUT` (60 s). On Windows
-the same smoke boot (`just vm::smoke`) needs a machine with Hyper-V enabled (Pro, Education, or
-Enterprise — §2) and an elevated shell, since creating a machine through the
-Host Compute System API is an administrative act; the media itself is verified
-without booting either way (`verify.txt`).
+the same smoke boot (`just vm::smoke`) needs the Windows Hypervisor Platform
+enabled and `openvmm.exe` staged (`scripts/build-openvmm.ps1`), and runs
+unelevated; the media itself is verified without booting either way
+(`verify.txt`).
 
 ### Open past this point
 
@@ -533,14 +521,14 @@ without booting either way (`verify.txt`).
   both are shipped if both are modules, so whichever it is, is already
   loaded.
 - **The amd64 table's provenance**: every module name in it was checked against
-  the file list Ubuntu's own `linux-modules-7.0.0-14-generic` (amd64, resolute)
-  ships and against that kernel's `debian.master/config/annotations` for `=m`
-  versus `=y` — not against a `modules.dep` produced by a build here, because
-  no amd64 build has been run yet on the fleet. That is exactly what the
-  build's hard failure exists for: a drifted name stops the build, and it
-  cannot ship a boot artifact that would fail at `mount(2)` instead.
-- **Windows boot path**: no longer a Gen-2 UEFI unified kernel image. Hyper-V's
-  `LinuxKernelDirect` loader takes the bzImage and this initramfs directly, the
-  way `VZLinuxBootLoader` takes the `Image` — so the UKI step §2 anticipated is
+  Ubuntu's own `linux-modules-7.0.0-14-generic` (amd64, resolute): its config
+  (from `linux-buildinfo`) for `=m` versus `=y`, and a `depmod` over its files
+  run through `build-boot.sh`'s own selection and ordering. Resolute has no
+  `linux-modules-extra` for `generic`, so nothing else is fetched. No full
+  amd64 build has been run yet on the fleet; the build's hard failure stops a
+  drifted name before it ships a boot artifact that would fail at `mount(2)`.
+- **Windows boot path**: no UEFI and no unified kernel image. OpenVMM's direct
+  Linux boot takes the bzImage and this initramfs directly, the way
+  `VZLinuxBootLoader` takes the `Image` — so the UKI step §2 anticipated is
   simply not needed. What remains open is validation on real hardware: a
-  Windows box with Hyper-V, per §10.
+  Windows box with the Windows Hypervisor Platform, per §10.

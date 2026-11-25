@@ -2,7 +2,8 @@
 
 # Builds the Unix release matrix locally, as build-binaries.yml does on Actions.
 # Publishing is Actions' alone: push a `v*` tag.  Windows and synod are built
-# only by Actions.
+# only by Actions.  Packaging generates third-party notices on the host, which
+# needs just and cargo-about 0.9.3 there.
 # For a stable release, the `v<version>` tag must match [workspace.package].version
 # in Cargo.toml. Update both HomebrewFormula URLs together, with the same SHA-256
 # computed from the actual GitHub tag archive, not a local archive.
@@ -79,16 +80,19 @@ let artifact_dir = "$repo_root/target/release-artifacts"
 let cache_dir    = "$repo_root/target/release-cache"
 
 # Read here, not in `main`: a dry run's handler would intercept `uname`.
-let host_os   = norm_os !{uname -s}
-let host_arch = norm_arch !{uname -m}
+let host_os     = norm_os !{uname -s}
+let host_arch   = norm_arch !{uname -m}
+let host_triple = rustc --print host-tuple
 
 # The cross images ship amd64 only (run under Rosetta on Apple Silicon).
 let musl_x86     = 'messense/rust-musl-cross:x86_64-musl'
 let musl_arm     = 'messense/rust-musl-cross:aarch64-musl'
 let pull_images  = [$musl_x86, $musl_arm]
 
+# Cargo features; package-release.sh takes them bare, for the notices.
 let plain    = []
-let allutils = ['--features', 'allutils']
+let allutils = ['allutils']
+let flags_of = { |feats| return !{map { |f| return "--features=$f" } $feats} }
 
 # Shared by --local and --macos.  Names are built with `intercalate`: "$os-$arch"
 # would parse as looking up `$os-`.  `sign` ad-hoc codesigns, as macOS requires.
@@ -96,12 +100,12 @@ let host_build = { |target pkg name feats sign|
     echo ''
     echo "!{styled cyan '==>'} !{styled yellow $name} !{styled dim '(host cargo)'}"
     within [env: [CARGO_TARGET_DIR: $target]] {
-        cargo build --release -p $pkg ...$feats
+        cargo build --release -p $pkg ...!{flags_of $feats}
     }
     let dst = "$cache_dir/binaries/$name"
     cp "$target/release/$pkg" $dst
     if $sign { attempt { codesign -s - $dst } }
-    bash "$repo_root/scripts/package-release.sh" $dst "$artifact_dir/$name.tar.gz"
+    bash "$repo_root/scripts/package-release.sh" $dst "$artifact_dir/$name.tar.gz" $host_triple ...$feats
 }
 let host_variants_ral = { |target os arch sign|
     host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch]}             $plain $sign
@@ -179,10 +183,10 @@ let main = {
                 '-v', "$td:/work/target",
                 '-w', '/work',
             ]
-            docker run ...$run_args $t[img] cargo build --release -p $t[pkg] --target $t[triple] ...$t[feats]
+            docker run ...$run_args $t[img] cargo build --release -p $t[pkg] --target $t[triple] ...!{flags_of $t[feats]}
             cp "$td/$t[triple]/release/$t[bin]" $out
             attempt { chmod +x $out }
-            bash "$repo_root/scripts/package-release.sh" $out "$artifact_dir/$t[out].tar.gz"
+            bash "$repo_root/scripts/package-release.sh" $out "$artifact_dir/$t[out].tar.gz" $t[triple] ...$t[feats]
         }
     }
 

@@ -110,15 +110,22 @@ box +recipes:
         -v ral-linux-target:/workspace/.target-linux \
         ral-linux-box sh -c 'rustup -q target add "$(uname -m)-unknown-linux-musl" && exec just "$@"' box {{recipes}}
 
+# Write the third-party notices of PACKAGE, as built for TARGET with FEATURES, to OUT in an existing directory (needs cargo-about 0.9.3).
+third-party package target out *features:
+    cargo about generate --fail --locked --config packaging/about/about.toml --manifest-path {{package}}/Cargo.toml --target {{target}} {{ if features == '' { '' } else { '--features ' + quote(features) } }} --name notices --output-file {{quote(out)}} packaging/about
+
 # Build and install ral and exarch from source, with their notices.
 [unix]
 install: _install-crates
     #!/bin/sh
     set -eu
     cargo_home={{quote(cargo_home)}}
+    host=$(rustc --print host-tuple)
     for package in ral exarch; do
         mkdir -p "$cargo_home/share/$package"
         cp LICENSE-APACHE LICENSE-MIT NOTICE "$cargo_home/share/$package"
+        notices=$(printf 'THIRDPARTY-%s' "$package" | tr a-z A-Z)
+        {{quote(just_executable())}} third-party "$package" "$host" "$cargo_home/share/$package/$notices"
     done
     cp vendor/edtui/LICENSE.md "$cargo_home/share/exarch/LICENSE-EDTUI"
     # ral-sh is a name, not a binary: the POSIX bridge lives in ral and keys on argv[0].
@@ -133,6 +140,8 @@ install: _install-crates
     Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE '{{cargo_home}}/share/ral'
     Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE '{{cargo_home}}/share/exarch'
     Copy-Item vendor/edtui/LICENSE.md '{{cargo_home}}/share/exarch/LICENSE-EDTUI'
+    & {{quote(just_executable())}} third-party ral (rustc --print host-tuple) '{{cargo_home}}/share/ral/THIRDPARTY-RAL'
+    & {{quote(just_executable())}} third-party exarch (rustc --print host-tuple) '{{cargo_home}}/share/exarch/THIRDPARTY-EXARCH'
 
 _install-crates:
     cargo +stable install --force --locked --path ral

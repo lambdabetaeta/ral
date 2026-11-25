@@ -1,6 +1,17 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/261124_windows-runs-openvmm
 ---
+
+> **Superseded 2026-11-24** by
+> [[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]. OpenVMM on
+> the Windows Hypervisor Platform needs no privilege at run time, so the
+> `SynodMachineBroker` service, its pipe protocol, its WiX fragment, its
+> `%ProgramData%` cache and the `synod-machine-broker` crate are gone. Synod
+> spawns the VMM itself, under the user's token. Still in force from this page:
+> the argument against Hyper-V Administrators (a physical disk reads past
+> NTFS), and against WSL. The price of dropping the service is recorded there:
+> the VMM runs with the user's full token.
 
 # The Windows privilege lives in a service, not in the user
 

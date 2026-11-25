@@ -6,16 +6,14 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialBackend {
-    Broker,
-    HyperV,
+    OpenVmm,
     Virtualization,
 }
 
 impl fmt::Display for DialBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Broker => "broker",
-            Self::HyperV => "Hyper-V",
+            Self::OpenVmm => "OpenVMM",
             Self::Virtualization => "Virtualization.framework",
         })
     }
@@ -23,7 +21,6 @@ impl fmt::Display for DialBackend {
 
 #[derive(Debug)]
 pub enum DialError {
-    Unsupported(DialBackend),
     MachineThreadStopped,
     MissingSocketDevice,
     NonVirtioSocketDevice,
@@ -33,6 +30,10 @@ pub enum DialError {
         within: Duration,
     },
     WaitDisconnected {
+        port: u32,
+    },
+    /// The relay reached the guest, but nothing there accepted the port.
+    Unanswered {
         port: u32,
     },
     Platform {
@@ -47,10 +48,6 @@ pub enum DialError {
 impl fmt::Display for DialError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported(backend) => write!(
-                f,
-                "the {backend} backend does not support connecting to a guest socket"
-            ),
             Self::MachineThreadStopped => f.write_str(
                 "the machine thread stopped before the guest connection could be obtained",
             ),
@@ -66,6 +63,10 @@ impl fmt::Display for DialError {
             Self::WaitDisconnected { port } => write!(
                 f,
                 "the guest connection result channel disconnected while waiting for port {port}"
+            ),
+            Self::Unanswered { port } => write!(
+                f,
+                "no listener in the guest accepted a connection on port {port}"
             ),
             Self::Platform {
                 backend,

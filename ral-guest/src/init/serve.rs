@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use guest_abi::boot::{Boot, Export, Net};
+use guest_abi::boot::{Boot, Net};
 use guest_abi::layout;
 use rustix::system::{RebootCommand, reboot};
 use rustix::time::{ClockId, Timespec, clock_settime};
@@ -45,15 +45,11 @@ pub(crate) fn serve() -> Result<Infallible, String> {
     }
     mount::scratch_temp()?;
     mount::exec_cgroup()?;
-    let export = match &boot.workspace {
-        Export::Virtiofs { tag } => format!("virtiofs tag `{tag}`"),
-        Export::Plan9 { name, port } => {
-            format!("the host's 9p share `{name}`, over vsock port {port}")
-        }
-    };
     eprintln!(
-        "ral-guest: guest filesystems up; the granted folder is mounted at {} from {export}",
-        layout::WORK
+        "ral-guest: guest filesystems up; the granted folder is mounted at {} from virtiofs tag \
+         `{}`",
+        layout::WORK,
+        boot.workspace
     );
 
     // Disable unprivileged user namespaces before engines to preserve cross-uid ptrace isolation.

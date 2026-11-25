@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-generated_at_date: 2026-11-10
-covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
+generated_at_commit: 723d5391e6080f7f299325283f9c0bf84e43e886
+generated_at_date: 2026-11-24
+covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod/, vm-image/]
 ---
 
 # Map: synod
@@ -25,9 +25,8 @@ One runtime agreement connects the host, guest, engine and image tools
   loading and guest-engine construction; it depends on core.
 - `netgate` — host CONNECT gate, TCP/IP stack and audit ledger; it depends
   on core and `guest-abi`.
-- `vm-manager` — machine construction, lifecycle, media and broker client;
-  its runtime workspace dependency is `guest-abi`.
-- `synod-machine-broker` — binary-only Windows service over `vm-manager`.
+- `vm-manager` — machine construction, lifecycle and media; its runtime
+  workspace dependency is `guest-abi`, and it has no privileged half.
 - `ral-guest` — binary-only Linux PID 1 over `guest-abi`.
 - `ral-vm-image-build-tools` (`vm-image/build-tools/`) — manifest production
   and checking over core and `guest-abi`.
@@ -42,12 +41,11 @@ One PID 1 assembles and supervises the guest without an exec between stages.
   agreement. `boot::Net` validates routing once and preserves it through
   private fields. Changes to boot, the factory port, layout or framing bump
   `boot::CONTRACT` beside its writer and reader.
-- `boot::Export` states the host's filesystem choice, so the guest need not infer
-  its hypervisor from devices. Virtiofs tags and 9p `aname`s share the stricter
-  36-byte virtiofs limit; validation precedes export selection because key order
-  is arbitrary. The engine path defaults because it belongs to the image.
-- `ral.port`, `ral.plan9` and `ral.net` name separate host-side control,
-  workspace and network ports: confusing them connects different protocols.
+- `Boot.workspace` is the virtiofs tag of the granted folder on both
+  platforms, within virtiofs's 36-byte limit (`CONTRACT` 4). The engine path
+  defaults because it belongs to the image.
+- `ral.port` and `ral.net` name separate host-side control and network ports:
+  confusing them connects different protocols.
   Without a network, the engine receives no proxy environment for a missing peer.
 - `packet` is shared by host and guest without a Linux gate to prevent codec
   drift. Frames have no prologue and reject invalid lengths before allocation.
@@ -62,9 +60,6 @@ One PID 1 assembles and supervises the guest without an exec between stages.
 - Module metadata supplies a load-order hint; missing symbols can resolve after
   another pass, so loading repeats while it makes progress. An absent manifest
   permits kernels with built-in drivers; `EEXIST` already satisfies a requirement.
-- `mount.rs` uses the LCOW agent's 64 KiB 9p `msize` for both socket buffer
-  requests too: smaller buffers split messages into additional round trips.
-  Linux doubles and clamps these advisory requests.
 - The host supplies the boot clock because the guest has no reliable RTC.
   It is set once; long sessions can drift, and further correction belongs on
   the protocol rather than under a second clock authority in PID 1.
@@ -136,29 +131,41 @@ modules directly. **Only real machines are constructed.**
   the `Hypervisor`/`Machine` traits; every machine method is required.
 - `direct(artifact)` and `detect(media)` check availability before
   construction and resolve artifacts before another process opens them.
-  `detect` prefers the Windows broker without invoking lazy `BootMedia`.
-  Missing hardware support, entitlement, permission or media gives a refusal.
-  MSI cabinets cannot hold a two-gigabyte rootfs file, so installed media is
-  compressed; laziness avoids inflating a second per-user copy beside the service's.
+  `detect` checks availability before invoking its lazy `BootMedia`, so a
+  refused host inflates nothing. Missing hardware support, entitlement, WHP,
+  `openvmm.exe` or media gives a refusal. MSI cabinets cannot hold a
+  two-gigabyte rootfs file, so installed media is compressed.
 - `media::locate` tries bundle `../Resources/boot`, installed `boot` beside
   the executable, then a `target` ancestor's checkout output. Packed rootfs
   plus checksum wins in an installation; checkout rootfs is under
   `vm-image/out/rootfs/`.
-- `Layout::ready` verifies and publishes `rootfs-<sha256>.img`;
-  `Layout::found` preserves packed media for Windows' direct VHD preparation.
-  `publish` locks `<leaf>.lock`, prepares a unique temporary file, syncs it
+- `Layout::ready` verifies and publishes `rootfs-<sha256>.img`, the raw disk
+  both backends attach. `publish` locks `<leaf>.lock`, prepares a unique temporary file, syncs it
   and publishes without replacement. `inflate` bounds the zstd window.
 - `lifecycle.rs::await_dials` receives control and net against one 60-second
-  deadline. `stop_within` polls for five seconds before forcing.
+  deadline; its refusals (`Undialled`, with a per-wire cause, or
+  `EndedBeforeDial` for a guest power event) quote the console and name the
+  hypervisor's own log when it has one. `stop_within` polls every `PULSE`
+  for five seconds before forcing, and a force that fails is returned in
+  place of `ForcedStop`.
   `SessionDisk` holds a std exclusive lease in a unique
-  `ral-vm-session-<epoch>-<pid>-<suffix>` directory. Removal retries for two
-  seconds; `sweep` reclaims aged, unleased directories without following
-  links or Windows reparse points, on both backends.
+  `ral-vm-session-<epoch>-<pid>-<suffix>` directory under `temp_dir()`, the
+  one session directory on both backends. It is private from creation:
+  mode `0700` on Unix, and on Windows a protected owner DACL given to
+  `CreateDirectoryW`; there it also holds the backend's `AF_UNIX` sockets. `session.img` is sparse and
+  `SESSION_BYTES` (8 GiB) on both. Removal retries for two seconds; `sweep`
+  reclaims aged, unleased directories without following links or other
+  reparse points, and one predicate admits our own socket entries
+  (`r.sock`, `v.sock`, `v.sock_<digits>`, each an `AF_UNIX` reparse point)
+  to both `Drop` and `sweep`.
 - `error.rs` owns data-only `Error`; `worded(spell)` renders at the caller's
   boundary. `GuestConsole::{Kept, Unkept}` distinguishes a retained empty
   console from no retained copy. `GuestConsole::report` supplies engine-loss
-  diagnostics. `os_path.rs` uses serde's `OsString` encoding on the broker
-  pipe, preserving non-Unicode paths.
+  diagnostics. Windows refusals include `HypervisorPlatformOff`,
+  `NoVmm { looked_in }`, `SocketPathTooLong { path }` (set both `TMP` and
+  `TEMP`, since Windows reads `TMP` first), `NoPlainSpelling` (a path Win32
+  would read as another) and `VmmFailed` (OpenVMM's own failure, with its
+  log's tail), each naming its remedy.
 - `vz/{mod,config,queue}.rs` owns the macOS arm64 machine, configuration
   and serial-queue operations. It requires the virtualization entitlement,
   shares the folder through virtiofs, attaches RO rootfs and RW sparse
@@ -166,60 +173,30 @@ modules directly. **Only real machines are constructed.**
   Its console goes to stdout without a retained copy.
   The generated `objc2` binding avoids a Swift shim and its second toolchain;
   configuration construction needs no entitlement, but validation already does.
-- `hcs/{mod,api,spec,hvsock,vhd,console,win}.rs` owns the Windows x86_64
-  machine. HCS is dynamically loaded; its JSON document specifies direct
-  kernel boot, a 9p folder share, disks and sockets, with no network adapter.
-  A dynamic session VHD declares 8 GiB; immutable fixed rootfs VHDs are
-  prepared through `media::publish`. The console tees stdout, a bounded
-  log and a line ring. Access granted to boot files is revoked at teardown.
-  `AllowOvercommit` backs guest memory lazily, so an idle 6 GiB session need
-  not consume 6 GiB of host RAM.
+- `openvmm/{mod,hypervisor,proto,relay,ttrpc,process,afunix,console,win}.rs`
+  owns the Windows x86_64 machine: one unprivileged `openvmm.exe` on WHP,
+  spawned by absolute path into a kill-on-close Job Object it joins at
+  creation, and ready once `r.sock` accepts
+  ([[decisions/261124_windows-runs-openvmm|windows-runs-openvmm]]).
+  `proto.rs` and `ttrpc.rs` hand-encode `CreateVM`/`ResumeVM` over `r.sock`;
+  with `relay.rs`'s `CONNECT`/`OK` parser they compile under
+  `cfg(any(windows, test))`, so their golden tests run on Linux. The machine has
+  direct kernel boot, raw rootfs and session disks on VMBus SCSI, VPCI
+  virtio-fs (`metadata` or `metadata;ro`), the hybrid vsock relay at
+  `v.sock`, a COM1 console that OpenVMM opens on Synod's pipe, and no
+  network adapter. Guest power events exit the process (0 shutdown, 64/65/66
+  reset/crash/watchdog), and the exit code is the stop. The console tees
+  stdout, a bounded log and a line ring; OpenVMM's stderr is a sibling log.
+  Guest RAM is committed at boot and faulted in lazily.
 - `Machine::dial_engine(&self) -> Result<Socket, DialError>` asks for
   `guest_abi::ports::FACTORY`; `connect_guest(&self, port: u32)` has the same
-  result type. macOS implements the dial; the two Windows machine
-  implementations answer `DialError::Unsupported`.
+  result type. Both backends implement it: macOS on the vsock device,
+  Windows by `CONNECT <port>` on `v.sock`, where a port with no listener is
+  `DialError::Unanswered`.
 - `dial.rs` owns `DialError` and `DialBackend`, independent of ral-core.
   Failures retain machine/device/completion state, timeout versus disconnected
   wait, backend and native platform domain/code/detail, or the original
   `io::Error`. Presentation does not replace this evidence.
-
-## synod-machine-broker/ — the privileged service
-
-**The connection is the machine's lease**, and the caller supplies only a
-folder and read-only flag
-([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
-
-- `vm-manager/src/broker/wire.rs` owns `PIPE`, `VERSION`, `Request`, `Reply`
-  and length-prefixed JSON with a 1 MiB cap checked before allocation.
-  Every change to a pipe-carried type increments the version.
-- `vm-manager/src/broker/client.rs::Brokered` probes and asks the service;
-  `adopt_socket` adopts the duplicated socket for this client process.
-  `BrokeredGuest` closes the pipe on shutdown or drop.
-- `synod-machine-broker/src/service.rs` is the privileged boundary: pipe
-  SDDL admits SYSTEM, Administrators and interactive users; a first-instance
-  pipe prevents replacement. Version refusal precedes `boot_for`.
-- `open_for_client` impersonates the caller with a revert guard;
-  `Granted` pins the folder, checks reparse points and verifies it remains
-  unchanged. The kernel supplies the client PID for socket duplication.
-  `Boot → Booted → Adopted` preserves socket and folder ownership order.
-- `rights_for` checks list/traverse/attribute rights, adding file and folder
-  creation for writable grants. It omits `FILE_DELETE_CHILD`: ordinary Modify
-  grants delete through rights on the file and need not hold that directory right.
-- `Granted::open` uses backup semantics to open directories; it grants no extra
-  access without enabled backup privilege. Identification-only clients cannot
-  open as the caller and are refused. The final name surrogate is refused because
-  its access check covers the link, not the target; cloud placeholders remain valid.
-- Holding the grant without `FILE_SHARE_DELETE` pins its path, including ancestors,
-  while HCS opens it by name. An empty pinned folder can still become a junction,
-  so `unchanged` rechecks after boot. Wires drop before the machine, then the grant.
-- The service discovers and resolves its own media through
-  `media::locate(&exe)?.found().resolve()` and uses
-  `%ProgramData%\Synod\Machine`; direct HCS uses the user's local cache.
-- `scm.rs` owns service startup and `--console`, reporting RUNNING before
-  serving. `synod/wix/broker-service.wxs` installs the LocalSystem service
-  beside the application and boot media. Checkout helpers are
-  `just synod::broker-install` and `just synod::broker-uninstall`.
-  Cargo declares the binary on every platform; off Windows it refuses to run.
 
 ## synod/src/ — five layers
 
@@ -596,8 +573,8 @@ Boot compatibility is checked by the image tools before bundling.
   defining constants; `check-media` compares them. Present media without
   a readable manifest is refused; absent media is left to bundling.
 - `synod/tauri.bundle.conf.json` runs `check-media` before building the
-  bundle; platform configurations carry media, entitlement and MSI service
-  resources. `synod/gen/` is regenerated for the build target.
+  bundle; platform configurations carry media and entitlements, and
+  `tauri.bundle.windows.conf.json` stages `openvmm.exe`, its licence and `THIRDPARTY-OPENVMM`; `tauri.bundle.conf.json` carries `THIRDPARTY-SYNOD`, which `just synod::bundle` generates. `synod/gen/` is regenerated for the build target.
   The check and resource map are selected by `cargo tauri build --config`;
   keeping them in the bundle configuration prevents `tauri-build` from
   probing guest media during ordinary compilation.
@@ -607,11 +584,10 @@ Boot compatibility is checked by the image tools before bundling.
 The source describes behavior; a successful build alone does not witness a
 machine boot.
 
-- The macOS path has prior end-to-end exercise. On Windows, the recorded
-  evidence reaches kernel/initramfs/PID 1; completion of a compatible guest
-  boot and whether the host's 9p server can read the folder unaided still
-  require runtime verification. Windows helper dials remain unsupported.
-  `vm-manager/examples/{boot-smoke,broker-smoke}.rs` are the boot probes.
+- The macOS path has prior end-to-end exercise. The Windows OpenVMM backend
+  awaits native acceptance on a standard account: a boot, virtio-fs metadata
+  on NTFS, host-to-guest dials, the named-pipe console and job containment.
+  `vm-manager/examples/boot-smoke.rs` is the boot probe.
 - The image README holds build instructions.
 - [[map/exarch/agent|exarch / agent]], [[map/exarch/frontend|exarch / frontend]]
   and [[design/engine-protocol|engine-protocol]] locate the reusable guest

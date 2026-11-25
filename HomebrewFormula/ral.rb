@@ -7,14 +7,28 @@ class Ral < Formula
   head do
     url "https://github.com/lambdabetaeta/ral.git", branch: "main"
     license all_of: ["Apache-2.0", "MIT"]
+
+    depends_on "cargo-about" => :build
+    depends_on "just" => :build
   end
 
   depends_on "rust" => :build
 
   def install
+    # Releases generate the notices with cargo-about 0.9.3; so must this build.
+    if build.head?
+      about = Formula["cargo-about"].version.to_s
+      odie "cargo-about #{about} is installed, but THIRDPARTY notices need 0.9.3" if about != "0.9.3"
+    end
+
     system "cargo", "install", *std_cargo_args(path: "ral")
     bin.install_symlink bin/"ral" => "ral-sh"
-    prefix.install "NOTICE", "LICENSE-APACHE", "LICENSE-MIT" if build.head?
+    if build.head?
+      prefix.install "NOTICE", "LICENSE-APACHE", "LICENSE-MIT"
+      system "just", "third-party", "ral", Utils.safe_popen_read("rustc", "--print", "host-tuple").chomp,
+             "THIRDPARTY-RAL"
+      prefix.install "THIRDPARTY-RAL"
+    end
   end
 
   def caveats

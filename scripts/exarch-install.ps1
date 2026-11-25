@@ -122,7 +122,7 @@
 
         $installDir = Join-Path $env:LOCALAPPDATA "Programs\ral"
         New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        foreach ($file in @("LICENSE-APACHE", "LICENSE-MIT", "NOTICE", "LICENSE-EDTUI")) {
+        foreach ($file in @("LICENSE-APACHE", "LICENSE-MIT", "NOTICE", "LICENSE-EDTUI", "THIRDPARTY-EXARCH")) {
             Copy-Item (Join-Path $tmp $file) (Join-Path $installDir $file) -Force
         }
 

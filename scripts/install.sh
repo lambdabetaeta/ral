@@ -146,8 +146,8 @@ main() {
     [ "$#" -le 2 ] || die "usage: install.sh [ral|exarch] [TAG]"
     product="${1:-ral}"
     case "$product" in
-        ral)    licenses="LICENSE-APACHE LICENSE-MIT NOTICE" ;;
-        exarch) licenses="LICENSE-APACHE LICENSE-MIT NOTICE LICENSE-EDTUI" ;;
+        ral)    licenses="LICENSE-APACHE LICENSE-MIT NOTICE THIRDPARTY-RAL" ;;
+        exarch) licenses="LICENSE-APACHE LICENSE-MIT NOTICE LICENSE-EDTUI THIRDPARTY-EXARCH" ;;
         *) die "unknown product: $product (expected ral or exarch)" ;;
     esac
 

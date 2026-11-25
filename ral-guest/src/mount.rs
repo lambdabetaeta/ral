@@ -1,37 +1,22 @@
 //! Mount parents before descendants; root assembly precedes this plan.
-//! Workspace transport varies only through the mount options, resolved at application.
 
-use std::ffi::{CStr, CString};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::ffi::CStr;
 
 use rustix::fs::{Mode, mkdir};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, mount};
 
-use crate::vsock;
-use guest_abi::boot::{Boot, Export};
+use guest_abi::boot::Boot;
 use guest_abi::layout::{EXEC_CGROUP, EXEC_CONTROLLERS, SCRATCH, WORK};
-
-const VIRTIOFS: &str = "virtiofs";
-
-const PLAN9: &str = "9p";
-
-/// The 9p msize and both socket buffer requests must agree.
-const MSIZE: u32 = 65536;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Options {
     None,
     Fixed(&'static CStr),
-    /// The options name a descriptor that exists only after dialing.
-    Plan9Dial {
-        port: u32,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Mount {
-    /// Export names also identify the share in /proc/mounts; neither transport has a device.
     pub(crate) source: String,
     pub(crate) target: &'static str,
     pub(crate) fstype: &'static str,
@@ -45,34 +30,7 @@ impl Mount {
         match &self.data {
             Options::None => self.mount_with(None),
             Options::Fixed(options) => self.mount_with(Some(options)),
-            Options::Plan9Dial { port } => self.mount_plan9(*port),
         }
-    }
-
-    fn mount_plan9(&self, port: u32) -> Result<(), String> {
-        let name = &self.source;
-        let socket = vsock::dial_host(port).map_err(|err| {
-            format!(
-                "could not reach the host's 9p server for the granted folder on vsock port \
-                 {port}: {err}. The host serves the share `{name}` there; is `ral.plan9` the \
-                 port the session manager published? (`ral.port` is the control plane, a \
-                 different one.)"
-            )
-        })?;
-        vsock::set_buffer_sizes(socket.as_fd(), MSIZE).map_err(|err| {
-            format!(
-                "could not size the 9p transport socket's buffers to {MSIZE} bytes, the mount's \
-                 own msize: {err}"
-            )
-        })?;
-        let options = plan9_options(socket.as_raw_fd(), name);
-        let options = CString::new(options).map_err(|err| {
-            format!("the 9p mount options for `{name}` are not a C string: {err}")
-        })?;
-        self.mount_with(Some(&options))?;
-        // The kernel's 9p trans=fd transport holds its own file reference after mount succeeds.
-        drop(socket);
-        Ok(())
     }
 
     fn mount_with(&self, data: Option<&CStr>) -> Result<(), String> {
@@ -107,11 +65,6 @@ pub(crate) fn dev() -> Mount {
         flags: MountFlags::NOSUID,
         data: Options::Fixed(c"mode=0755"),
     }
-}
-
-/// rfdno and wfdno name the same connected socket; aname names the granted share.
-fn plan9_options(fd: RawFd, name: &str) -> String {
-    format!("trans=fd,rfdno={fd},wfdno={fd},msize={MSIZE},version=9p2000.L,aname={name}")
 }
 
 /// /proc must precede `Boot::read`, which reads /proc/cmdline.
@@ -175,7 +128,14 @@ pub(crate) fn plan(boot: &Boot) -> Vec<Mount> {
             flags: kernel,
             data: Options::Fixed(c"nsdelegate"),
         },
-        workspace(&boot.workspace, scratch),
+        // virtiofs takes its tag as the source; there is no device.
+        Mount {
+            source: boot.workspace.clone(),
+            target: WORK,
+            fstype: "virtiofs",
+            flags: scratch,
+            data: Options::None,
+        },
     ]
 }
 
@@ -198,25 +158,6 @@ pub(crate) fn scratch_temp() -> Result<(), String> {
     rustix::fs::chmod(path.as_str(), mode).map_err(|err| {
         format!("could not make {path} writable for guest commands with sticky mode 1777: {err}")
     })
-}
-
-fn workspace(export: &Export, flags: MountFlags) -> Mount {
-    match export {
-        Export::Virtiofs { tag } => Mount {
-            source: tag.clone(),
-            target: WORK,
-            fstype: VIRTIOFS,
-            flags,
-            data: Options::None,
-        },
-        Export::Plan9 { name, port } => Mount {
-            source: name.clone(),
-            target: WORK,
-            fstype: PLAN9,
-            flags,
-            data: Options::Plan9Dial { port: *port },
-        },
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,21 +195,11 @@ mod tests {
 
     fn boot() -> Boot {
         Boot {
-            workspace: Export::Virtiofs { tag: "work".into() },
+            workspace: "work".into(),
             port: 1729,
             epoch: 0,
             engine: guest_abi::boot::DEFAULT_ENGINE.into(),
             net: None,
-        }
-    }
-
-    fn boot_over_plan9() -> Boot {
-        Boot {
-            workspace: Export::Plan9 {
-                name: "work".into(),
-                port: 50001,
-            },
-            ..boot()
         }
     }
 
@@ -331,21 +262,14 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_is_mounted_the_same_way_under_either_hypervisor() {
-        let of = |config: &Boot| {
-            plan(config)
-                .into_iter()
-                .find(|m| m.target == WORK)
-                .expect("the plan mounts the workspace")
-        };
-        let (virtiofs, plan9) = (of(&boot()), of(&boot_over_plan9()));
-        assert_eq!(virtiofs.target, plan9.target);
-        assert_eq!(virtiofs.flags, plan9.flags);
-        assert_eq!(
-            plan(&boot()).len(),
-            plan(&boot_over_plan9()).len(),
-            "the shape of the export changes one mount, not the plan"
-        );
+    fn the_workspace_is_the_virtiofs_tag_mounted_at_work() {
+        let workspace = plan(&boot())
+            .into_iter()
+            .find(|m| m.target == WORK)
+            .expect("the plan mounts the workspace");
+        assert_eq!(workspace.source, "work");
+        assert_eq!(workspace.fstype, "virtiofs");
+        assert_eq!(workspace.data, Options::None);
     }
 
     #[test]

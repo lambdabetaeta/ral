@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../target/openvmm/openvmm.exe": "openvmm.exe",
+      "../target/openvmm/LICENSE-OPENVMM": "licenses/LICENSE-OPENVMM",
+      "../target/openvmm/THIRDPARTY-OPENVMM": "licenses/THIRDPARTY-OPENVMM"
+    }
+  }
+}

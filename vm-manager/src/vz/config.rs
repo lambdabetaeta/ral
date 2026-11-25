@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use guest_abi::{boot::Export, layout::WORKSPACE_NAME};
+use guest_abi::layout::WORKSPACE_NAME;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSFileHandle, NSString, NSURL};
@@ -14,8 +14,6 @@ use objc2_virtualization::{
 
 use crate::error::{Act, Error, HostFile};
 use crate::lifecycle::SessionDisk;
-
-pub(super) const SESSION_IMAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 pub(super) struct Plan {
     pub(super) kernel: PathBuf,
@@ -43,7 +41,9 @@ pub(super) fn build_configuration(
 
         let boot = VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel);
         boot.setInitialRamdiskURL(Some(&initramfs));
-        boot.setCommandLine(&NSString::from_str(&command_line(plan)));
+        boot.setCommandLine(&NSString::from_str(&crate::spec::boot_line(
+            "hvc0", plan.epoch,
+        )));
         config.setBootLoader(Some(&boot));
 
         // The disk stack: read-only rootfs first, read-write session second.
@@ -101,16 +101,6 @@ pub(super) fn validate(config: &VZVirtualMachineConfiguration) -> Result<(), Err
     // `NSError` or nothing; it starts no machine.
     unsafe { config.validateWithError() }
         .map_err(|error| Error::backend(super::HYPERVISOR, ns_error(&error)))
-}
-
-fn command_line(plan: &Plan) -> String {
-    crate::spec::boot_line(
-        Export::Virtiofs {
-            tag: WORKSPACE_NAME.into(),
-        },
-        "hvc0",
-        plan.epoch,
-    )
 }
 
 /// # Errors
@@ -201,8 +191,8 @@ mod tests {
             kernel: make("kernel", 4096),
             initramfs: make("initramfs", 4096),
             rootfs: make("rootfs.img", 64 * 1024 * 1024),
-            session: SessionDisk::create(dir.path(), crate::lifecycle::Leaf::Raw, |disk| {
-                disk.set_len(SESSION_IMAGE_BYTES)
+            session: SessionDisk::create(dir.path(), |disk| {
+                disk.set_len(crate::lifecycle::SESSION_BYTES)
             })
             .unwrap(),
             folder: spec.folder,

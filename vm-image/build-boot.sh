@@ -70,7 +70,7 @@ case "$ARCH" in
   arm64)
     # Virtualization.framework: virtio disks, hvc0 console, virtiofs workspace,
     # virtio vsock. CONFIG_HYPERV_VSOCKETS is recorded and declined (no device).
-    CHECK_SYMS=(CONFIG_VIRTIO CONFIG_VIRTIO_RING CONFIG_VIRTIO_MMIO CONFIG_VIRTIO_PCI
+    CHECK_SYMS=(CONFIG_VIRTIO CONFIG_VIRTIO_MMIO CONFIG_VIRTIO_PCI
                 CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE CONFIG_VIRTIO_FS CONFIG_VSOCKETS
                 CONFIG_VIRTIO_VSOCKETS CONFIG_HYPERV_VSOCKETS CONFIG_OVERLAY_FS
                 CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT CONFIG_TUN
@@ -79,7 +79,7 @@ case "$ARCH" in
     # `virtio_vsock`); modules.dep pulls `vsock` in. CONFIG_TUN backs no
     # device: the guest's only NIC is a tun to a host-side user-mode stack (§6).
     declare -A MODNAME=(
-      [CONFIG_VIRTIO]=virtio [CONFIG_VIRTIO_RING]=virtio_ring
+      [CONFIG_VIRTIO]=virtio
       [CONFIG_VIRTIO_MMIO]=virtio_mmio [CONFIG_VIRTIO_PCI]=virtio_pci
       [CONFIG_VIRTIO_BLK]=virtio_blk [CONFIG_VIRTIO_CONSOLE]=virtio_console
       [CONFIG_VSOCKETS]=vsock [CONFIG_VIRTIO_VSOCKETS]=vmw_vsock_virtio_transport
@@ -89,11 +89,12 @@ case "$ARCH" in
     BIN_FORMAT="ARM aarch64"
     ;;
   amd64)
-    # Hyper-V: `hv_vmbus` is the bus (storvsc, utils, balloon ride on it). No
-    # `hv_netvsc`: the guest has no VMBus NIC (§6), so CONFIG_HYPERV_NET is only
-    # recorded. vsock is `hv_sock`; CONFIG_VIRTIO_VSOCKETS is recorded and declined.
-    # The workspace is a 9p share over vsock: `9pnet_fd` must be named, or on
-    # kernels that split it from `9pnet` the mount fails with a bare ENODEV.
+    # OpenVMM: `hv_vmbus` is the bus (storvsc, utils, balloon, pci-hyperv ride
+    # on it). No `hv_netvsc`: the guest has no VMBus NIC (§6), so
+    # CONFIG_HYPERV_NET is only recorded. vsock is `hv_sock`;
+    # CONFIG_VIRTIO_VSOCKETS is recorded and declined. The workspace is
+    # virtio-fs on VPCI: `pci-hyperv` exposes the VMBus PCI bus, `virtio_pci`
+    # binds the device, `virtiofs` mounts it.
     # scsi_mod and sd_mod are `=y` today; they stay in the map so a kernel that
     # modularises them still ships them. Serial 8250 is `=y`: nothing to ship.
     # CONFIG_HYPERV (umbrella bool) is not CONFIG_HYPERV_VMBUS (the tristate):
@@ -102,17 +103,20 @@ case "$ARCH" in
     CHECK_SYMS=(CONFIG_HYPERV CONFIG_HYPERV_VMBUS CONFIG_HYPERV_STORAGE
                 CONFIG_HYPERV_UTILS
                 CONFIG_HYPERV_BALLOON CONFIG_HYPERV_NET CONFIG_VSOCKETS
-                CONFIG_HYPERV_VSOCKETS CONFIG_VIRTIO_VSOCKETS CONFIG_9P_FS
-                CONFIG_NET_9P CONFIG_NET_9P_FD CONFIG_SCSI CONFIG_BLK_DEV_SD
+                CONFIG_HYPERV_VSOCKETS CONFIG_VIRTIO_VSOCKETS CONFIG_PCI_HYPERV
+                CONFIG_VIRTIO CONFIG_VIRTIO_PCI CONFIG_VIRTIO_FS CONFIG_FUSE_FS
+                CONFIG_SCSI CONFIG_BLK_DEV_SD
                 CONFIG_OVERLAY_FS CONFIG_EXT4_FS CONFIG_DEVTMPFS
                 CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_8250 CONFIG_TUN
                 CONFIG_SECCOMP_FILTER CONFIG_NET_NS)
-    # Real basenames as linux-modules ships them (`hv_storvsc`, `hv_sock`, `9p`).
+    # Real basenames as linux-modules ships them (`hv_storvsc`, `pci-hyperv`).
     declare -A MODNAME=(
       [CONFIG_HYPERV_VMBUS]=hv_vmbus [CONFIG_HYPERV_STORAGE]=hv_storvsc
       [CONFIG_HYPERV_UTILS]=hv_utils [CONFIG_HYPERV_BALLOON]=hv_balloon
       [CONFIG_VSOCKETS]=vsock [CONFIG_HYPERV_VSOCKETS]=hv_sock
-      [CONFIG_9P_FS]=9p [CONFIG_NET_9P]=9pnet [CONFIG_NET_9P_FD]=9pnet_fd
+      [CONFIG_PCI_HYPERV]=pci-hyperv [CONFIG_VIRTIO]=virtio
+      [CONFIG_VIRTIO_PCI]=virtio_pci [CONFIG_VIRTIO_FS]=virtiofs
+      [CONFIG_FUSE_FS]=fuse
       [CONFIG_SCSI]=scsi_mod [CONFIG_BLK_DEV_SD]=sd_mod
       [CONFIG_OVERLAY_FS]=overlay [CONFIG_EXT4_FS]=ext4 [CONFIG_TUN]=tun
     )
@@ -148,6 +152,16 @@ file "$BIN/ral-guest" "$BIN/exarch"
 for b in ral-guest exarch; do
   is_guest_binary "$BIN/$b" \
     || { echo "error: $b is not a static $BIN_FORMAT binary: $(file -b "$BIN/$b")" >&2; exit 1; }
+done
+
+# The guest binaries' third-party notices, for the graph just built.
+echo ">> [container] generating third-party notices"
+cargo install --quiet --locked --features cli cargo-about@0.9.3
+rm -rf /build/notices && mkdir /build/notices
+for pkg in ral-guest exarch; do
+  ( cd /ral && cargo about generate --fail --locked --config packaging/about/about.toml \
+      --manifest-path "$pkg/Cargo.toml" --target "$RUST_TARGET" \
+      --name notices --output-file "/build/notices/THIRDPARTY-${pkg^^}" packaging/about )
 done
 
 # Manifest versions come from the same checkout as the guest binaries.
@@ -188,8 +202,9 @@ echo ">> [container] kernel $KVER: $(file -b "$KERNEL_PATH")"
 # arm64 (VZLinuxBootLoader) needs a raw ARM64 `Image`, but vmlinuz is wrapped
 # (PE with a .linux section, or EFI zboot: "zimg" at byte 4, LE32 payload
 # offset/size at 8/12; compressed, nested per suite): peel until it is one.
-# amd64 (Hyper-V) wants a bzImage, which vmlinuz already is: copied and asserted,
-# never peeled (that would yield an ELF vmlinux). The helpers serve arm64 only.
+# amd64 (OpenVMM direct boot) wants a bzImage, which vmlinuz already is: copied
+# and asserted, never peeled (that would yield an ELF vmlinux). The helpers
+# serve arm64 only.
 le16() { od -An -tu2 -j"$2" -N2 "$1" | tr -d ' '; }
 le32() { od -An -tu4 -j"$2" -N4 "$1" | tr -d ' '; }
 
@@ -246,7 +261,7 @@ case "$ARCH" in
     file -b /out/kernel | grep -q "Linux kernel x86 boot executable bzImage" \
       || { echo "Ubuntu's amd64 vmlinuz is not a bzImage: $(file -b /out/kernel)" >&2; exit 1; }
     echo ">> [container] bzImage shipped as-is: $(file -b /out/kernel)"
-    KERNEL_NOTE="x86 bzImage, Ubuntu's vmlinuz verbatim (Hyper-V's LinuxKernelDirect boots this)"
+    KERNEL_NOTE="x86 bzImage, Ubuntu's vmlinuz verbatim (OpenVMM's direct Linux boot loads this)"
     ;;
 esac
 
@@ -290,7 +305,7 @@ if [ "${#NEEDED_MODULES[@]}" -gt 0 ]; then
     line=$(grep -m1 "^[^:]*/${name}\.ko[^:]*:" "$MODDEP" || true)
     if [ -z "$line" ]; then
       # MODNAME has drifted from the kernel; the guest would fail at mount.
-      echo "error: $name is =m in the kernel config but not in modules.dep" >&2
+      echo "error: $name is =m in the kernel config but not in $MODULES_PKG's modules.dep (renamed, or moved to another package such as linux-modules-extra)" >&2
       exit 1
     fi
     # A leaf's line ends at the colon ("vsock.ko.zst:"), so ${line#*:} is empty.
@@ -302,9 +317,8 @@ if [ "${#NEEDED_MODULES[@]}" -gt 0 ]; then
     done
   done
 
-  # Load order is computed: modules.dep lists dependencies as an unordered set
-  # (`9pnet_fd: 9pnet netfs`, yet 9pnet needs netfs first). A pass that emits
-  # nothing means a dependency cycle.
+  # Load order is computed: modules.dep lists dependencies as an unordered set,
+  # not a load order. A pass that emits nothing means a dependency cycle.
   ORDER=/tmp/module-order
   : > "$ORDER"
   emitted=" "
@@ -361,6 +375,7 @@ cp "$BIN/exarch" /build/cpio/engine
 install -d /build/cpio/usr/share/doc/exarch
 install -m 0644 /ral/LICENSE-APACHE /ral/LICENSE-MIT /ral/NOTICE /build/cpio/usr/share/doc/exarch/
 install -m 0644 /ral/vendor/edtui/LICENSE.md /build/cpio/usr/share/doc/exarch/LICENSE-EDTUI
+install -m 0644 /build/notices/THIRDPARTY-RAL-GUEST /build/notices/THIRDPARTY-EXARCH /build/cpio/usr/share/doc/exarch/
 chmod 0755 /build/cpio/init /build/cpio/engine /build/cpio/sbin/mke2fs
 # /dev/console is init's stdio; rootless podman has no CAP_MKNOD, so the node
 # and the archive recording it are made under fakeroot.
@@ -397,7 +412,8 @@ fakeroot sh -c '
   echo "== cpio path manifest =="
   for path in init engine sbin/mke2fs modules.order dev/console \
     usr/share/doc/exarch/LICENSE-APACHE usr/share/doc/exarch/LICENSE-MIT \
-    usr/share/doc/exarch/NOTICE usr/share/doc/exarch/LICENSE-EDTUI; do
+    usr/share/doc/exarch/NOTICE usr/share/doc/exarch/LICENSE-EDTUI \
+    usr/share/doc/exarch/THIRDPARTY-RAL-GUEST usr/share/doc/exarch/THIRDPARTY-EXARCH; do
     [ -e "/build/cpio/$path" ] && echo "OK   /$path" || echo "MISSING /$path"
   done
   [ -d /build/cpio/modules ] && echo "OK   /modules (${#NEEDED_MODULES[@]} driver(s) requested)"

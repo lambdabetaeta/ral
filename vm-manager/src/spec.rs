@@ -2,9 +2,9 @@ use std::io;
 use std::path::PathBuf;
 
 #[cfg(any(target_os = "macos", windows))]
-use guest_abi::boot::{Boot, DEFAULT_ENGINE, Export, Net, command_line};
+use guest_abi::boot::{Boot, DEFAULT_ENGINE, Net, command_line};
 #[cfg(any(target_os = "macos", windows))]
-use guest_abi::ports;
+use guest_abi::{layout::WORKSPACE_NAME, ports};
 
 use crate::error::Error;
 use crate::site::{Silent, site};
@@ -78,10 +78,10 @@ impl BootArtifact {
 }
 
 #[cfg(any(target_os = "macos", windows))]
-pub(crate) fn boot_line(workspace: Export, console: &str, epoch: u64) -> String {
+pub(crate) fn boot_line(console: &str, epoch: u64) -> String {
     command_line(
         &Boot {
-            workspace,
+            workspace: WORKSPACE_NAME.into(),
             port: ports::CONTROL,
             epoch: i64::try_from(epoch).unwrap_or(i64::MAX),
             engine: DEFAULT_ENGINE.into(),

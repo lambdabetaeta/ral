@@ -7029,15 +7029,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "synod-machine-broker"
-version = "0.10.0"
-dependencies = [
- "tempfile",
- "vm-manager",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9036,8 +9027,6 @@ dependencies = [
  "objc2-virtualization",
  "ral-core",
  "ruzstd",
- "serde",
- "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "windows-sys 0.61.2",

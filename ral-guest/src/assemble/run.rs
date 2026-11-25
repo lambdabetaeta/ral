@@ -151,16 +151,24 @@ fn install_engine() -> Result<(), String> {
 
 fn install_legal_files() -> Result<(), String> {
     const SOURCE: &str = "/usr/share/doc/exarch";
+    const FILES: [&str; 6] = [
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "NOTICE",
+        "LICENSE-EDTUI",
+        "THIRDPARTY-RAL-GUEST",
+        "THIRDPARTY-EXARCH",
+    ];
     let dest = format!("{}{SOURCE}", plan::NEWROOT);
     fs::create_dir_all(&dest)
         .map_err(|err| format!("could not create guest legal-file directory {dest}: {err}"))?;
-    for name in ["LICENSE-APACHE", "LICENSE-MIT", "NOTICE", "LICENSE-EDTUI"] {
+    for name in FILES {
         let source = format!("{SOURCE}/{name}");
         let target = format!("{dest}/{name}");
         fs::copy(&source, &target).map_err(|err| {
             format!(
                 "could not preserve {source} at {target} before switch_root: {err}; \
-                 vm-image/build-boot.sh must include all four exarch legal files in the initramfs"
+                 vm-image/build-boot.sh must include all of {FILES:?} in the initramfs"
             )
         })?;
     }

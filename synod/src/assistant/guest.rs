@@ -10,8 +10,8 @@ use exarch::record::AgentId;
 use ral_core::authority::grant::value::GrantValue;
 use ral_core::fact::{
     DurationFact, EngineFactoryFailure, EngineFactoryFailureDialTimedOut,
-    EngineFactoryFailureDialWaitDisconnected, EngineFactoryFailurePlatform,
-    EngineFactoryFailureUnsupported, FactoryBackend,
+    EngineFactoryFailureDialUnanswered, EngineFactoryFailureDialWaitDisconnected,
+    EngineFactoryFailurePlatform, FactoryBackend,
 };
 use ral_core::own::OwnDir;
 use ral_core::path::{GuestPath, shown};
@@ -40,11 +40,6 @@ impl Factory for MachineFactory {
 
 fn dial_failure(error: DialError) -> EngineFactoryFailure {
     match error {
-        DialError::Unsupported(backend) => {
-            EngineFactoryFailure::Unsupported(EngineFactoryFailureUnsupported {
-                backend: factory_backend(backend),
-            })
-        }
         DialError::MachineThreadStopped => EngineFactoryFailure::MachineThreadStopped,
         DialError::MissingSocketDevice => EngineFactoryFailure::MissingSocketDevice,
         DialError::NonVirtioSocketDevice => EngineFactoryFailure::NonVirtioSocketDevice,
@@ -63,6 +58,9 @@ fn dial_failure(error: DialError) -> EngineFactoryFailure {
                 port,
             })
         }
+        DialError::Unanswered { port } => {
+            EngineFactoryFailure::DialUnanswered(EngineFactoryFailureDialUnanswered { port })
+        }
         DialError::Platform {
             backend,
             domain,
@@ -80,8 +78,7 @@ fn dial_failure(error: DialError) -> EngineFactoryFailure {
 
 fn factory_backend(backend: DialBackend) -> FactoryBackend {
     match backend {
-        DialBackend::Broker => FactoryBackend::Broker,
-        DialBackend::HyperV => FactoryBackend::HyperV,
+        DialBackend::OpenVmm => FactoryBackend::OpenVmm,
         DialBackend::Virtualization => FactoryBackend::Virtualization,
     }
 }

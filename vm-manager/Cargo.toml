@@ -2,6 +2,7 @@
 name = "vm-manager"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 license.workspace = true
 
 [lints]
@@ -13,7 +14,6 @@ path = "src/lib.rs"
 
 [dependencies]
 tempfile = { workspace = true }
-serde      = { workspace = true }
 # Pure Rust permits cross-checking without a target C toolchain; only decoding is needed.
 ruzstd = { workspace = true }
 sha2   = { workspace = true }
@@ -29,27 +29,25 @@ block2              = "0.6"
 dispatch2           = { version = "0.3", features = ["block2"] }
 
 [target.'cfg(windows)'.dependencies]
-serde_json = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
-    "Win32_System_Hypervisor",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
-    "Win32_System_Diagnostics_Debug",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
-    # ReadFile, WriteFile and ConnectNamedPipe require OVERLAPPED even for blocking calls.
+    # DeviceIoControl, ReadFile and ConnectNamedPipe take OVERLAPPED even for blocking calls.
     "Win32_System_IO",
+    "Win32_System_Ioctl",
 ] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # The smoke example needs the frame protocol without search builtins.
 ral-core = { path = "../core", default-features = false }

@@ -1,8 +1,8 @@
-//! The guest dials control, workspace and net streams; only the engine factory listens.
+//! The guest dials control and net streams; only the engine factory listens.
 //! Factory peers must have the host CID; PID 1 shares the ABI without linking the engine runtime.
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 fn vsock_socket() -> io::Result<OwnedFd> {
     // SAFETY: a plain `socket(2)`; the returned descriptor is adopted by an
@@ -98,33 +98,4 @@ pub(crate) fn accept_from_host(listener: &OwnedFd) -> io::Result<Option<OwnedFd>
         let conn = unsafe { OwnedFd::from_raw_fd(raw) };
         return Ok(is_host(peer.svm_cid).then_some(conn));
     }
-}
-
-/// Match both buffer requests to the 9p msize; Linux may double and clamp them.
-pub(crate) fn set_buffer_sizes(socket: BorrowedFd<'_>, bytes: u32) -> io::Result<()> {
-    let size = libc::c_int::try_from(bytes).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("a socket buffer of {bytes} bytes does not fit setsockopt's int"),
-        )
-    })?;
-    let len = libc::socklen_t::try_from(size_of::<libc::c_int>())
-        .expect("an int is far smaller than socklen_t's range");
-    for option in [libc::SO_RCVBUF, libc::SO_SNDBUF] {
-        // SAFETY: `size` is a live `c_int` and `len` is its own size, which
-        // is what `setsockopt(2)` reads for both of these options.
-        let rc = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                option,
-                std::ptr::from_ref(&size).cast(),
-                len,
-            )
-        };
-        if rc < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
